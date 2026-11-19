@@ -51,6 +51,7 @@ class Job:
         self.finished = None
         self.cancelled = False
         self.code = None            # code typed in by the user for an MFA code prompt
+        self.decision = None        # 'ack' or 'stop' for a Notice Board prompt
         self.shot = None            # latest screenshot file name
         self.dir = DEBUG_DIR / self.id
 
@@ -69,7 +70,7 @@ current: Job | None = None
 
 
 def busy():
-    return current is not None and current.state in ("running", "waiting_mfa", "waiting_code")
+    return current is not None and current.state in ("running", "waiting_mfa", "waiting_code", "waiting_ack")
 
 
 def start(mode, period, settings, secrets):
@@ -86,12 +87,31 @@ def _strip_url(u):
     return f"{p.scheme}://{p.netloc}{p.path}"
 
 
-async def _visible(page, selector):
+REAL_VISIBLE_JS = """(sel) => {
+  const ok = e => {
+    if (e.closest('[aria-hidden=true], .moveOffScreen')) return false;
+    if (e.type === 'hidden') return false;
+    const cs = getComputedStyle(e);
+    if (cs.display === 'none' || cs.visibility === 'hidden' || +cs.opacity === 0) return false;
+    const r = e.getBoundingClientRect();
+    return r.width > 2 && r.height > 2 && r.right > 0 && r.bottom > 0 && r.left < innerWidth;
+  };
+  return [...document.querySelectorAll(sel)].find(ok) || null;
+}"""
+
+
+async def _real(page, selector):
+    """First element matching selector that a person could actually see and use (Microsoft keeps
+    off-screen copies of its inputs, e.g. class 'moveOffScreen', which must be ignored)."""
     try:
-        loc = page.locator(selector).first
-        return await loc.count() > 0 and await loc.is_visible()
+        h = await page.evaluate_handle(REAL_VISIBLE_JS, selector)
+        return h.as_element()
     except Exception:
-        return False
+        return None
+
+
+async def _visible(page, selector):
+    return await _real(page, selector) is not None
 
 
 async def _text(page, selector):
@@ -148,17 +168,22 @@ async def _settle(page):
 
 async def _click_submit(page):
     for sel in ("#idSIButton9", "input[type=submit]", "button[type=submit]"):
-        if await _visible(page, sel):
-            await page.locator(sel).first.click()
+        el = await _real(page, sel)
+        if el:
+            try:
+                await el.click(timeout=5000)
+            except Exception:
+                await el.evaluate("e => e.click()")  # something overlaps it (e.g. Microsoft's footer)
             return True
     await page.keyboard.press("Enter")
     return True
 
 
 async def _fill(page, selector, value):
-    loc = page.locator(selector).first
-    await loc.click()
-    await loc.fill(value)
+    el = await _real(page, selector)
+    if not el:
+        raise RuntimeError(f"Expected field not found on the page ({selector}).")
+    await el.fill(value, timeout=10000)
 
 
 async def _sabre_user_field(page):
@@ -216,19 +241,7 @@ async def _run(job: Job, settings, secrets):
 
                 if host in MS_HOSTS:
                     err = await _text(page, "#usernameError, #passwordError, #idTD_Error, .alert-error, [role=alert]")
-                    if await _visible(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]"):
-                        sig = "ms-email"
-                        if sig == last_sig and err:
-                            raise RuntimeError(f"Microsoft rejected the email: {err}")
-                        if counts.get(sig, 0) >= 2:
-                            raise RuntimeError(f"Microsoft keeps asking for the email. {err}".strip())
-                        if not email:
-                            raise RuntimeError("Microsoft email isn't set. Add it in Settings.")
-                        await rec.snap(page, "microsoft-email")
-                        job.step("Microsoft: entering email")
-                        await _fill(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]", email)
-                        await _click_submit(page)
-                    elif await _visible(page, "input[name=passwd], input[type=password]"):
+                    if await _visible(page, "input[name=passwd], input[type=password]"):
                         sig = "ms-password"
                         if counts.get(sig, 0) >= 1:
                             await rec.snap(page, "microsoft-password-again")
@@ -239,6 +252,18 @@ async def _run(job: Job, settings, secrets):
                         await rec.snap(page, "microsoft-password")
                         job.step("Microsoft: entering password")
                         await _fill(page, "input[name=passwd], input[type=password]", ms_pw)
+                        await _click_submit(page)
+                    elif await _visible(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]"):
+                        sig = "ms-email"
+                        if sig == last_sig and err:
+                            raise RuntimeError(f"Microsoft rejected the email: {err}")
+                        if counts.get(sig, 0) >= 2:
+                            raise RuntimeError(f"Microsoft keeps asking for the email. {err}".strip())
+                        if not email:
+                            raise RuntimeError("Microsoft email isn't set. Add it in Settings.")
+                        await rec.snap(page, "microsoft-email")
+                        job.step("Microsoft: entering email")
+                        await _fill(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]", email)
                         await _click_submit(page)
                     elif await _visible(page, "#idRichContext_DisplaySign, .displaySign"):
                         sig = "ms-number"
@@ -265,8 +290,12 @@ async def _run(job: Job, settings, secrets):
                         sig = "ms-kmsi"
                         await rec.snap(page, "microsoft-stay-signed-in")
                         job.step("Microsoft: choosing 'Stay signed in'")
-                        if await _visible(page, "#KmsiCheckboxField, input[name=DontShowAgain]"):
-                            await page.locator("#KmsiCheckboxField, input[name=DontShowAgain]").first.check()
+                        cb = await _real(page, "#KmsiCheckboxField, input[name=DontShowAgain]")
+                        if cb:
+                            try:
+                                await cb.check(timeout=5000)
+                            except Exception:
+                                pass
                         await _click_submit(page)
                     else:
                         body = (await _text(page, "body"))[:300]
@@ -297,7 +326,7 @@ async def _run(job: Job, settings, secrets):
                     uf = await _sabre_user_field(page)
                     if uf and user_id:
                         await uf.fill(user_id)
-                    await page.locator("input[type=password]").first.fill(sabre_pw)
+                    await _fill(page, "input[type=password]", sabre_pw)
                     if not await _click_submit_in_form(page):
                         await page.keyboard.press("Enter")
                 else:
@@ -313,27 +342,22 @@ async def _run(job: Job, settings, secrets):
 
             job.step("Signed in")
             await rec.snap(page, "signed-in")
-            roster_url = (settings.get("rosterUrl") or "").strip()
             if job.mode == "test":
                 job.result = {"ok": True}
                 job.step("Login test passed")
             else:
-                if roster_url:
-                    job.step("Opening the roster page")
-                    await page.goto(roster_url, wait_until="domcontentloaded", timeout=60000)
-                    await _settle(page)
-                    await rec.snap(page, "roster-page")
-                job.step("Reading the roster")
-                data = await page.evaluate(EXTRACT_JS)
+                data = await _roster_report(page, job, rec, settings)
                 data["period"] = job.period
                 data["debugRun"] = job.id
                 job.result = data
                 (job.dir / "capture.json").write_text(json.dumps(data))
-                job.step(f"Captured {sum(len(f.get('tables', [])) for f in data.get('frames', []))} table(s) from “{data.get('title', '')}”")
             job.state = "done"
             store.log_add({"kind": "sabre", "ok": True, "message": f"Sabre {job.mode}: {job.steps[-1]['msg']}"})
     except Exception as e:
-        job.error = str(e) or e.__class__.__name__
+        msg = str(e) or e.__class__.__name__
+        if "Call log:" in msg or "\n" in msg:  # Playwright internals: keep only the headline
+            msg = "The page didn't respond as expected: " + msg.split("Call log:")[0].splitlines()[0].strip()
+        job.error = msg
         job.state = "cancelled" if job.cancelled else "failed"
         job.step(("Cancelled" if job.cancelled else "Failed: ") + ("" if job.cancelled else job.error))
         store.log_add({"kind": "sabre", "ok": False, "message": f"Sabre {job.mode} failed: {job.error}"})
@@ -418,3 +442,197 @@ def debug_file(job_id, name):
         return None
     p = DEBUG_DIR / job_id / name
     return p if p.exists() else None
+
+
+# ---------------- Sabre AirCentre Crew Connection: Notice Board -> Reports -> Roster Report ----------------
+MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
+NOTICE_LABELS = ["Notice Board", "Manual Notification", "Roster Change Notifications", "Not Notified", "Notified",
+                 "Broadcast Messages", "Nothing found to display", "Acknowledge", "Print"]
+
+FIND_JS = """([texts, clickableOnly]) => {
+  const norm = s => (s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+  const want = texts.map(norm);
+  const els = [...document.querySelectorAll('a, button, input[type=button], input[type=submit], input[type=image], span, td, div, li')];
+  let fallback = null;
+  for (const e of els) {
+    const v = norm(e.tagName === 'INPUT' ? (e.value || e.alt || e.title) : e.innerText);
+    if (!want.includes(v)) continue;
+    if (['A', 'BUTTON', 'INPUT'].includes(e.tagName)) return e;
+    if (!clickableOnly && !fallback) fallback = e;
+  }
+  return fallback;
+}"""
+
+SET_DATES_JS = """([from, to]) => {
+  const ins = [...document.querySelectorAll('input')].filter(i => !['hidden', 'button', 'submit', 'image', 'checkbox', 'radio', 'password'].includes((i.type || 'text').toLowerCase()));
+  const labelOf = i => {
+    const row = i.closest('tr');
+    let t = row ? row.innerText : '';
+    if (!t) { let p = i.previousSibling; while (p && !t) { t = (p.textContent || '').trim(); p = p.previousSibling; } }
+    return (t + ' ' + (i.name || '') + ' ' + (i.id || '')).toLowerCase();
+  };
+  let f = ins.find(i => /from/.test(labelOf(i)));
+  let t = ins.find(i => i !== f && /\\bto\\b|to:|todate|to_date|dateto/.test(labelOf(i)));
+  if (!f || !t) { if (ins.length >= 2) { f = f || ins[0]; t = t || ins[1]; } else return false; }
+  const set = (el, v) => {
+    const ro = el.readOnly; el.readOnly = false;
+    const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+    d.set.call(el, v);
+    ['input', 'change', 'keyup', 'blur'].forEach(n => el.dispatchEvent(new Event(n, { bubbles: true })));
+    el.readOnly = ro;
+  };
+  set(f, from); set(t, to);
+  return [f.value, t.value];
+}"""
+
+
+def _sabre_date(iso):
+    y, m, d = iso.split("-")
+    return f"{d}{MONTHS[int(m) - 1]}{y[2:]}"
+
+
+async def _all_text(page):
+    out = []
+    for fr in page.frames:
+        try:
+            out.append(await fr.evaluate("() => document.body ? document.body.innerText : ''"))
+        except Exception:
+            pass
+    return "\n".join(out)
+
+
+async def _find(page, texts, clickable_only=True):
+    for fr in page.frames:
+        try:
+            h = await fr.evaluate_handle(FIND_JS, [texts, clickable_only])
+            el = h.as_element()
+            if el:
+                return fr, el
+        except Exception:
+            pass
+    return None, None
+
+
+async def _click(page, texts, what, clickable_only=True):
+    fr, el = await _find(page, texts, clickable_only)
+    if not el:
+        raise RuntimeError(f"Couldn't find “{what}” on the Sabre page. Send the diagnostics file so this can be adjusted.")
+    try:
+        await el.click(timeout=5000)
+    except Exception:
+        await el.evaluate("e => e.click()")
+    await _settle(page)
+
+
+async def _wait_text(page, pattern, timeout, job):
+    end = time.time() + timeout
+    rx = re.compile(pattern, re.I)
+    while time.time() < end:
+        if job.cancelled:
+            raise RuntimeError("Cancelled.")
+        txt = await _all_text(page)
+        m = rx.search(txt)
+        if m:
+            return m, txt
+        await asyncio.sleep(1.5)
+    return None, await _all_text(page)
+
+
+async def _notice_board(page, job, rec):
+    txt = await _all_text(page)
+    if "Notice Board" not in txt:
+        return None
+    fr, ack = await _find(page, ["Acknowledge"])
+    if not ack:
+        return None
+    body = txt.split("Notice Board", 1)[1].split("Acknowledge", 1)[0]
+    rest = body
+    for lab in NOTICE_LABELS:
+        rest = rest.replace(lab, " ")
+    rest = re.sub(r"\s+", " ", rest).strip()
+    await rec.snap(page, "notice-board")
+    if rest:
+        notice = re.sub(r"[ \t]+", " ", body).strip()
+        job.prompt = {"kind": "notice", "text": notice[:3000]}
+        job.state = "waiting_ack"
+        job.decision = None
+        job.step("Sabre Notice Board has notices: waiting for you to read and acknowledge")
+        end = time.time() + 600
+        while time.time() < end and not job.decision:
+            if job.cancelled:
+                raise RuntimeError("Cancelled.")
+            await asyncio.sleep(1)
+        job.state, job.prompt = "running", None
+        if job.decision != "ack":
+            raise RuntimeError("Stopped at the Notice Board without acknowledging.")
+        job.step("Acknowledging notices (approved by you)")
+    else:
+        job.step("Notice Board empty: acknowledging")
+    try:
+        await ack.click(timeout=5000)
+    except Exception:
+        await ack.evaluate("e => e.click()")
+    await _settle(page)
+    return rest or ""
+
+
+async def _roster_report(page, job, rec, settings):
+    notices = await _notice_board(page, job, rec)
+
+    job.step("Opening Reports → Roster Report")
+    fr, link = await _find(page, ["Roster Report"])
+    if not link:
+        await _click(page, ["Reports"], "Reports menu", clickable_only=False)
+    await _click(page, ["Roster Report"], "Roster Report")
+    await rec.snap(page, "roster-report-form")
+
+    start, end = job.period["start"], job.period["end"]
+    f, t = _sabre_date(start), _sabre_date(end)
+    job.step(f"Requesting {f} to {t}")
+    done = False
+    for fr in page.frames:
+        try:
+            r = await fr.evaluate(SET_DATES_JS, [f, t])
+            if r:
+                done = True
+                break
+        except Exception:
+            pass
+    if not done:
+        raise RuntimeError("Couldn't find the From/To date boxes on the Roster Report page.")
+    await _click(page, ["Query"], "Query button")
+
+    m, txt = await _wait_text(page, rf"Roster Report from\s+{f}\s+to\s+{t}", 120, job)
+    if not m:
+        await rec.snap(page, "roster-report-not-loaded")
+        raise RuntimeError("Sabre didn't show the roster for those dates within 2 minutes. It may be busy. Try again later.")
+    await rec.snap(page, "roster-report")
+    job.step("Roster loaded")
+
+    data = await page.evaluate(EXTRACT_JS)
+    warnings = []
+    pm = re.search(r"Page\s+(\d+)\s+of\s+(\d+)", txt)
+    total = int(pm.group(2)) if pm else 1
+    for k in range(2, total + 1):
+        job.step(f"Reading page {k} of {total}")
+        fr, nxt = await _find(page, ["Next", ">", ">>", str(k)])
+        if not nxt:
+            warnings.append(f"Sabre shows {total} pages but the app couldn't find the link to page {k}. Only part of the roster was read.")
+            break
+        try:
+            await nxt.click(timeout=5000)
+        except Exception:
+            await nxt.evaluate("e => e.click()")
+        m2, _ = await _wait_text(page, rf"Page\s+{k}\s+of\s+{total}", 60, job)
+        if not m2:
+            warnings.append(f"Page {k} of {total} didn't load. Only part of the roster was read.")
+            break
+        await rec.snap(page, f"roster-report-page-{k}")
+        more = await page.evaluate(EXTRACT_JS)
+        data["frames"].extend(more.get("frames", []))
+    data["requested"] = {"from": f, "to": t}
+    data["notices"] = notices
+    data["warnings"] = warnings
+    rows = sum(len(tb["rows"]) for fr_ in data.get("frames", []) for tb in fr_.get("tables", []))
+    job.step(f"Captured the roster ({rows} table rows)")
+    return data

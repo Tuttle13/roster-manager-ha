@@ -1,18 +1,20 @@
 import { api, kv, captures, log, exportAll, importAll, wipeAll } from './db.js';
-import { defaultPeriod, validatePeriod, periodEnd, prettyDate, prettyRange, addDays } from './dates.js';
+import { defaultPeriod, validatePeriod, periodEnd, prettyDate, prettyRange, addDays, latestPublished, nextPublication } from './dates.js';
 import { setOverrides, isValidTz, tzFor, stampToUtc, utcToZoned } from './tz.js';
 import { DUTY_TYPES, newDuty, validateRoster, validateDuty, sortDuties, assignKeys, isAllDay } from './model.js';
 import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.1.0 (Home Assistant)';
+export const APP_VERSION = '0.2.0 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
   msEmail: 'piran.gartner@virginaustralia.com',
   sabreUserId: '21032',
   rosterUrl: '',
+  cycleAnchor: '2026-12-21',
+  publishDays: 10,
   googleClientId: '',
   calendarName: 'VA Roster',
   calendarId: '',
@@ -176,6 +178,7 @@ async function viewHome() {
       ${pending ? `<a class="btn wide" href="#/${pending.status === 'imported' ? 'review' : 'sync'}/${pending.id}">Continue: ${esc(prettyRange(pending.period.start, pending.period.end))} (${pending.status === 'imported' ? 'needs review' : 'needs sync'})</a>` : ''}
     </section>
     <section class="cards">
+      ${settings.cycleAnchor ? (() => { const n = nextPublication(settings.cycleAnchor, undefined, settings.publishDays || 10); const c = latestPublished(settings.cycleAnchor, undefined, settings.publishDays || 10); return `<div class="card"><h3>Roster cycle</h3><p class="big">${esc(prettyRange(c.start, c.end))}</p><p class="muted">Latest published roster. Next: ${esc(prettyRange(n.start, n.end))}, published ${esc(prettyDate(n.publish))}</p></div>`; })() : ''}
       <div class="card"><h3>Last capture</h3>
         <p class="big">${lastCapture ? esc(prettyRange(lastCapture.start, lastCapture.end)) : '—'}</p>
         <p class="muted">${lastCapture ? `Captured ${esc(fmtWhen(lastCapture.at))}` : 'No roster captured yet'}</p></div>
@@ -192,7 +195,7 @@ async function viewHome() {
 async function viewCapture() {
   setActiveTab('capture');
   const [lastCapture, creds, job] = await Promise.all([kv.get('lastCapture'), api('creds'), api('sabre/status')]);
-  const def = job && job.period && ['running', 'waiting_mfa', 'waiting_code'].includes(job.state) ? job.period : defaultPeriod(lastCapture);
+  const def = job && job.period && ['running', 'waiting_mfa', 'waiting_code', 'waiting_ack'].includes(job.state) ? job.period : defaultPeriod(lastCapture, settings.cycleAnchor, undefined, settings.publishDays || 10);
   const missing = [!creds.msPasswordSet && 'Microsoft password', !creds.sabrePasswordSet && 'Sabre password'].filter(Boolean);
   main.innerHTML = `
     <h2>Capture roster</h2>
@@ -208,7 +211,6 @@ async function viewCapture() {
     </section>
     <section class="panel">
       ${missing.length ? `<div class="notice warn">${esc(missing.join(' and '))} not saved yet. The run will stop if Sabre or Microsoft asks for it. <a href="#/settings">Settings → Work logins</a></div>` : ''}
-      ${settings.rosterUrl ? '' : '<div class="notice">The roster page address isn\'t set yet, so this run reads whatever page Sabre shows after login and saves diagnostics. Download them afterwards and send them to Claude to finish the roster reader.</div>'}
       <button class="capture-btn" id="runCapture">Capture Roster</button>
       <div id="jobArea"></div>
       <p class="muted">Sabre is only contacted when you press this: one attempt, no automatic retries.</p>
@@ -272,7 +274,7 @@ async function viewCapture() {
     } catch (err) { btn.disabled = false; toast(err.message, 'error', 8000); }
   });
 
-  if (job && ['running', 'waiting_mfa', 'waiting_code'].includes(job.state)) {
+  if (job && ['running', 'waiting_mfa', 'waiting_code', 'waiting_ack'].includes(job.state)) {
     $('#runCapture').disabled = true;
     watchJob($('#jobArea'), async j => {
       $('#runCapture') && ($('#runCapture').disabled = false);
@@ -304,17 +306,20 @@ function watchJob(area, onEnd) {
       <div class="job ${esc(j.state)}">
         ${prompt?.kind === 'number' ? `<div class="mfa"><span>Authenticator number</span><b>${esc(prompt.value)}</b><p>${esc(prompt.text)}</p></div>` : ''}
         ${prompt?.kind === 'approve' ? `<div class="mfa"><p>${esc(prompt.text)}</p></div>` : ''}
+        ${prompt?.kind === 'notice' ? `<div class="mfa notice-prompt"><p><b>Sabre has notices for you.</b> Read them before acknowledging. Acknowledging tells crewing you've seen them.</p><pre class="raw">${esc(prompt.text)}</pre><div class="toolbar"><button class="btn primary" id="noticeAck">Acknowledge &amp; continue</button><button class="btn" id="noticeStop">Stop</button></div></div>` : ''}
         ${prompt?.kind === 'code' ? `<div class="mfa"><p>${esc(prompt.text)}</p><div class="row"><input id="mfaCode" inputmode="numeric" autocomplete="one-time-code" placeholder="123456"><button class="btn primary" id="mfaSend">Send code</button></div></div>` : ''}
         <ol class="jobsteps">${j.steps.map(st => `<li><span class="muted">${st.t}s</span> ${esc(st.msg)}</li>`).join('')}</ol>
         ${j.state === 'failed' ? `<div class="notice error">${esc(j.error)}</div>` : ''}
         ${j.state === 'done' && j.mode === 'test' ? '<div class="notice ok">Login works.</div>' : ''}
         <div class="toolbar">
-          ${['running', 'waiting_mfa', 'waiting_code'].includes(j.state) ? '<button class="btn" id="jobCancel">Cancel</button>' : ''}
+          ${['running', 'waiting_mfa', 'waiting_code', 'waiting_ack'].includes(j.state) ? '<button class="btn" id="jobCancel">Cancel</button>' : ''}
           ${j.id ? `<a class="btn" href="api/sabre/debug.zip?id=${encodeURIComponent(j.id)}" download>Download diagnostics</a>` : ''}
         </div>
         ${j.shot ? `<details><summary>What the app is seeing</summary><img class="shot" src="api/sabre/shot/${encodeURIComponent(j.id)}/${encodeURIComponent(j.shot)}" alt="Latest screen"></details>` : ''}
       </div>`;
     $('#jobCancel', area)?.addEventListener('click', () => api('sabre/cancel', { method: 'POST' }));
+    $('#noticeAck', area)?.addEventListener('click', () => api('sabre/decide', { method: 'POST', body: { action: 'ack' } }).catch(err => toast(err.message, 'error')));
+    $('#noticeStop', area)?.addEventListener('click', () => api('sabre/decide', { method: 'POST', body: { action: 'stop' } }).catch(err => toast(err.message, 'error')));
     $('#mfaSend', area)?.addEventListener('click', async () => {
       try { await api('sabre/code', { method: 'POST', body: { code: $('#mfaCode', area).value } }); } catch (err) { toast(err.message, 'error'); }
     });
@@ -324,7 +329,8 @@ function watchJob(area, onEnd) {
     let j;
     try { j = await api('sabre/status'); } catch (err) { setTimeout(tick, 3000); return; }
     const typing = document.activeElement?.id === 'mfaCode';
-    if (!typing) render(j);
+    const key = JSON.stringify([j.state, j.steps.length, j.prompt, j.shot]);
+    if (!typing && key !== area.dataset.key) { area.dataset.key = key; render(j); }
     if (['done', 'failed', 'cancelled'].includes(j.state)) { if (!ended) { ended = true; onEnd(j); } return; }
     setTimeout(tick, 1500);
   };
@@ -609,7 +615,6 @@ async function viewSettings() {
       </div>
       <p class="muted">Passwords are encrypted on your Home Assistant box. They're never shown again, never written to logs, and excluded from Home Assistant and Google Drive backups. Leave a password box empty to keep the saved one.</p>
       <label>Sabre address<input id="sabreUrl" type="url" value="${esc(settings.sabreUrl)}"></label>
-      <label>Roster page address (optional)<input id="rosterUrl" type="url" value="${esc(settings.rosterUrl)}" placeholder="Set once the roster page is known"></label>
       <div class="toolbar">
         <button class="btn primary" id="saveLogins">Save</button>
         <button class="btn" id="testLogin">Test login</button>
@@ -680,7 +685,7 @@ async function viewSettings() {
     try { await fn(); } catch (e) { toast(e.message, 'error', 8000); } finally { setBusy(btn, false); }
   };
   const saveLogins = async () => {
-    await saveSettings({ sabreUrl: $('#sabreUrl').value.trim(), rosterUrl: $('#rosterUrl').value.trim(), msEmail: $('#msEmail').value.trim(), sabreUserId: $('#sabreUserId').value.trim() });
+    await saveSettings({ sabreUrl: $('#sabreUrl').value.trim(), msEmail: $('#msEmail').value.trim(), sabreUserId: $('#sabreUserId').value.trim() });
     const body = {};
     if ($('#msPassword').value) body.msPassword = $('#msPassword').value;
     if ($('#sabrePassword').value) body.sabrePassword = $('#sabrePassword').value;

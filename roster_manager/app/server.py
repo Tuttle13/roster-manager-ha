@@ -11,7 +11,7 @@ import sabre
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -184,6 +184,16 @@ async def sabre_code(r):
     if not j or j.state != "waiting_code" or not code.isdigit():
         raise ValueError("No code is being asked for, or the code isn't a number.")
     j.code = code
+    return web.json_response({"ok": True})
+
+
+@routes.post("/api/sabre/decide")
+async def sabre_decide(r):
+    j = sabre.current
+    action = (await r.json()).get("action")
+    if not j or j.state != "waiting_ack" or action not in ("ack", "stop"):
+        raise ValueError("Nothing is waiting for a decision.")
+    j.decision = action
     return web.json_response({"ok": True})
 
 

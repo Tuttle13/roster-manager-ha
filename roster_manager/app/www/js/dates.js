@@ -33,9 +33,39 @@ export function periodEnd(start) {
   return addDays(start, PERIOD_DAYS - 1);
 }
 
-// Default period: the 28 days following the last successful capture; otherwise starting today.
-export function defaultPeriod(lastCapture) {
-  const start = lastCapture && parseDate(lastCapture.end) ? addDays(lastCapture.end, 1) : todayLocal();
+// Roster cycle: periods start every 28 days from a known start (anchor) and are published
+// `publishDays` before they start (a Friday afternoon).
+export function cycleStartOnOrBefore(date, anchor) {
+  const diff = Math.round((parseDate(date) - parseDate(anchor)) / 86400000);
+  return addDays(anchor, Math.floor(diff / PERIOD_DAYS) * PERIOD_DAYS);
+}
+
+export function latestPublished(anchor, today = todayLocal(), publishDays = 10) {
+  // The newest period whose publish date has arrived.
+  let start = cycleStartOnOrBefore(addDays(today, publishDays), anchor);
+  return { start, end: periodEnd(start), publish: addDays(start, -publishDays) };
+}
+
+export function nextPublication(anchor, today = todayLocal(), publishDays = 10) {
+  const cur = latestPublished(anchor, today, publishDays);
+  const start = addDays(cur.start, PERIOD_DAYS);
+  return { start, end: periodEnd(start), publish: addDays(start, -publishDays) };
+}
+
+// Default period for a capture. With a cycle anchor: the newest published roster, or the one
+// after the last capture if that's already been captured. Without one: the 28 days after the
+// last capture, otherwise starting today.
+export function defaultPeriod(lastCapture, anchor = null, today = todayLocal(), publishDays = 10) {
+  if (anchor && parseDate(anchor)) {
+    const p = latestPublished(anchor, today, publishDays);
+    if (lastCapture && parseDate(lastCapture.end) && lastCapture.end >= p.end) {
+      const start = cycleStartOnOrBefore(addDays(lastCapture.end, 1), anchor);
+      const s2 = start <= lastCapture.end ? addDays(start, PERIOD_DAYS) : start;
+      return { start: s2, end: periodEnd(s2) };
+    }
+    return { start: p.start, end: p.end };
+  }
+  const start = lastCapture && parseDate(lastCapture.end) ? addDays(lastCapture.end, 1) : today;
   return { start, end: periodEnd(start) };
 }
 
