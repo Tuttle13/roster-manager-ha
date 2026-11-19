@@ -72,7 +72,11 @@ test('RB-style events: one event per flight duty, layover, day off, blank, stand
   assert.match(trip.description, /VA510  BNE 09:30 → SYD 11:00/);
   const lay = ev[2].body;
   assert.equal(lay.location, 'OOL');
-  assert.deepEqual([lay.start.dateTime, lay.end.dateTime], ['2026-12-01T13:45:00', '2026-12-02T06:00:00']);
+  assert.deepEqual([lay.start.dateTime, lay.end.dateTime], ['2026-12-01T14:15:00', '2026-12-01T17:15:00'], 'short block: 30 min after sign-off, 3 h');
+  assert.match(lay.description, /Sign off: 13:45 OOL local[\s\S]*Next report: 06:00 OOL local/);
+  const full = buildEventList(duties, { layoverStyle: 'full' }).find(e => /Layover/.test(e.body.summary)).body;
+  assert.deepEqual([full.start.dateTime, full.end.dateTime], ['2026-12-01T13:45:00', '2026-12-02T06:00:00']);
+  for (const e of buildEventList(duties)) assert.doesNotMatch(e.body.description, /Managed by Roster Manager/);
   assert.deepEqual(ev[3].body.start, { date: '2026-12-03' });
   assert.equal(new Set(ev.map(e => e.key)).size, ev.length, 'unique keys');
   const flying = buildEventList(duties, { flightSpan: 'flying', emoji: false });
@@ -116,4 +120,27 @@ test('roster cycle: anchor 21 Dec 2026, published 10 days before (Friday)', asyn
   assert.deepEqual(nextPublication(A, '2027-01-10'), { start: '2027-02-15', end: '2027-03-14', publish: '2027-02-05' });
   assert.deepEqual(dp(null, A, '2026-11-19'), { start: '2026-11-23', end: '2026-12-20' });
   assert.deepEqual(dp({ start: '2026-11-23', end: '2026-12-20' }, A, '2026-11-25'), { start: '2026-12-21', end: '2027-01-17' });
+});
+
+test('calendar bins: day duty, trip (+layover), standby, days off, sim, ground', async () => {
+  const { buildEventList } = await import('../roster_manager/app/www/js/events.js');
+  const L = (date, t, port) => ({ dt: `${date}T${t}`, basis: 'local', port });
+  const duties = [
+    F2('VA531', '2026-12-01', 'MEL', 'OOL', '07:00', '09:30', { report: L('2026-12-01', '06:00', 'MEL'), release: L('2026-12-01', '09:45', 'OOL') }),
+    F2('VA532', '2026-12-02', 'OOL', 'MEL', '07:00', '09:30', { report: L('2026-12-02', '06:00', 'OOL'), release: L('2026-12-02', '10:00', 'MEL') }),
+    newDuty({ type: 'STANDBY', date: '2026-12-03', code: 'SBY03', dep: 'MEL', start: L('2026-12-03', '03:00', 'MEL'), end: L('2026-12-03', '11:00', 'MEL') }),
+    newDuty({ type: 'DAY_OFF', date: '2026-12-04', code: 'PDO' }),
+    newDuty({ type: 'OTHER', date: '2026-12-05', code: 'BLANK' }),
+    newDuty({ type: 'LEAVE', date: '2026-12-06', code: 'ALVA', notes: 'ALVA: Annual leave' }),
+    newDuty({ type: 'LEAVE', date: '2026-12-07', code: 'SL', notes: 'SL: Sick leave' }),
+    newDuty({ type: 'TRAINING', date: '2026-12-08', code: 'SIM1', dep: 'MEL', start: L('2026-12-08', '09:00', 'MEL'), end: L('2026-12-08', '13:00', 'MEL') }),
+    newDuty({ type: 'TRAINING', date: '2026-12-09', code: 'RTP6-26_A', dep: 'MEL', notes: 'RTP6-26_A: Recurrent ground school', start: L('2026-12-09', '09:00', 'MEL'), end: L('2026-12-09', '13:00', 'MEL') }),
+  ];
+  const got = buildEventList(duties).map(e => `${e.cat}: ${e.body.summary}`);
+  assert.deepEqual(got, [
+    'trip: ✈️ MEL OOL', 'day: ✈️ OOL MEL', 'trip: 💼 Layover (20:15 hours)',
+    'standby: ⏱️ Standby Duty', 'off: 🏠 Day off - PDO', 'off: 🏠 Blank day', 'off: 🌴 Annual Leave', 'off: 🤒 Sick Leave',
+    'sim: 📚 Training - SIM1', 'ground: 📚 Training - RTP6-26_A',
+  ]);
+  assert.ok(buildEventList(duties).every(e => !e.body.colorId), 'calendar colours decide, not per-event colours');
 });

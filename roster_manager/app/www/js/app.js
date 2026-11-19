@@ -6,7 +6,7 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle, CATEGORIES } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.4.0 (Home Assistant)';
+export const APP_VERSION = '0.4.2 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
@@ -535,7 +535,7 @@ async function preparePlan(c, btn) {
     if (!settings.includeDaysOff) duties = duties.filter(d => d.type !== 'DAY_OFF');
     if (!settings.includeDaysOff) duties = duties.filter(d => !(d.type === 'OTHER' && /^BLANK$/i.test(d.code || '')));
     const keyed = assignKeys(duties);
-    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy, homeBase: settings.homeBase || 'MEL', emoji: settings.emojiTitles !== false, flightSpan: settings.flightSpan || 'duty', calFor: cat => (split ? cals[cat] : single) });
+    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy, homeBase: settings.homeBase || 'MEL', emoji: settings.emojiTitles !== false, flightSpan: settings.flightSpan || 'duty', layoverStyle: settings.layoverStyle || 'short', layoverHours: settings.layoverHours ?? 3, layoverOffsetMin: settings.layoverOffsetMin ?? 30, calFor: cat => (split ? cals[cat] : single) });
     currentPlan = { captureId: c.id, calendarId: cal.id, plan, keyed };
     renderPlan(c, currentPlan);
   } catch (e) {
@@ -675,6 +675,7 @@ async function viewSettings() {
       <label class="check"><input type="checkbox" id="emoji" ${settings.emojiTitles !== false ? 'checked' : ''}> Icons in event titles (✈️ 💼 🏠 ⏱️)</label>
       <div class="row">
         <label>Home base (no layovers here)<input id="homeBase" maxlength="3" value="${esc(settings.homeBase || 'MEL')}"></label>
+        <label>Layover events<select id="layoverStyle"><option value="short" ${settings.layoverStyle !== 'full' ? 'selected' : ''}>Short block: 30 min after sign-off, 3 hours</option><option value="full" ${settings.layoverStyle === 'full' ? 'selected' : ''}>Whole layover</option></select></label>
         <label>Flight events cover<select id="flightSpan"><option value="duty" ${settings.flightSpan !== 'flying' ? 'selected' : ''}>Report → sign off</option><option value="flying" ${settings.flightSpan === 'flying' ? 'selected' : ''}>First departure → last arrival</option></select></label>
       </div>
       <button class="btn" id="saveCal">Save</button> <button class="btn" id="newCal">Start fresh calendars</button>
@@ -754,7 +755,7 @@ async function viewSettings() {
     if (!p.get('code') || !p.get('state')) { toast('That doesn\'t look like the text from the Google page.', 'error'); return; }
     try { const r = await G.exchange(p.get('code'), p.get('state')); toast(r.missing?.length ? `Connected, but missing: ${r.missing.join(', ')}` : 'Google connected.', r.missing?.length ? 'error' : 'ok', 8000); route(); } catch (e) { toast(e.message, 'error', 9000); }
   });
-  $('#saveCal').addEventListener('click', async () => { await saveSettings({ splitCalendars: $('#split').checked, calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked, emojiTitles: $('#emoji').checked, homeBase: ($('#homeBase').value.trim() || 'MEL').toUpperCase(), flightSpan: $('#flightSpan').value }); toast('Saved.'); });
+  $('#saveCal').addEventListener('click', async () => { await saveSettings({ splitCalendars: $('#split').checked, calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked, emojiTitles: $('#emoji').checked, homeBase: ($('#homeBase').value.trim() || 'MEL').toUpperCase(), flightSpan: $('#flightSpan').value, layoverStyle: $('#layoverStyle').value }); toast('Saved.'); });
   $('#newCal').addEventListener('click', async () => {
     if (!(await confirmBox('Start with new, empty roster calendars? The old ones stay in Google Calendar but the app stops updating them.', 'Start fresh'))) return;
     await saveSettings({ calendarId: '', calendars: {}, calendarName: $('#calName').value.trim() || 'VA Roster' });

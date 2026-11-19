@@ -136,7 +136,10 @@ function rowsOf(table, headerIndex) {
     for (const c of r) { byPos[p] = c.t; p += c.cs || 1; }
     const row = {};
     for (const col of cols) row[col.name] = norm(byPos[col.at]);
-    if (Object.values(row).some(Boolean)) out.push({ row, raw: r.map(c => norm(c.t)).join(' | ') });
+    // Only real roster lines: a duty code or a flight. Skips footers like "Found 42 items, showing 1-42".
+    if (!(row.duty || row.flightnumber)) continue;
+    if (row.startdate && !sabreDate(row.startdate)) continue;
+    out.push({ row, raw: r.map(c => norm(c.t)).join(' | ') });
   }
   return out;
 }

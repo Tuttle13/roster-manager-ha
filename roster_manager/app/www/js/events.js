@@ -57,7 +57,6 @@ export function eventDescription(d) {
   if (d.aircraft) lines.push(`Aircraft: ${d.aircraft}`);
   if (d.annotations?.length) lines.push(...d.annotations.map(a => `• ${a}`));
   if (d.notes) lines.push('', d.notes);
-  lines.push('', 'Managed by Roster Manager. Edits here are overwritten on the next sync.');
   return lines.join('\n');
 }
 
@@ -126,6 +125,12 @@ export function groupSectors(sorted) {
   return groups;
 }
 
+// Shift a roster time by whole minutes, keeping its airport and basis.
+function addMinutes(stamp, minutes) {
+  const ms = Date.parse(`${stamp.dt}:00Z`) + minutes * 60000;
+  return { ...stamp, dt: new Date(ms).toISOString().slice(0, 16) };
+}
+
 function hoursText(ms) {
   const m = Math.round(ms / 60000);
   return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')} hours`;
@@ -167,7 +172,7 @@ function flightGroupEvent(g, opts) {
   if (release) lines.push(`Sign off: ${describeStamp(release)}`);
   const extras = [...new Set(g.flatMap(x => (x.notes || '').split('\n')).filter(Boolean))];
   if (extras.length) lines.push('', ...extras);
-  lines.push('', 'Times are local to each airport.', 'Managed by Roster Manager. Edits here are overwritten on the next sync.');
+  lines.push('', 'Times are local to each airport.');
   const body = {
     summary: t(opts, 'flight', `${allPax ? 'PAX ' : ''}${ports.join(' ')}`),
     description: lines.join('\n'),
@@ -196,10 +201,21 @@ export function buildEventList(duties, opts = {}) {
     const from = a.end; const to = b.start;
     const fu = stampToUtc(from); const tu = stampToUtc(to);
     if (fu == null || tu == null || tu <= fu) continue;
+    // Shown as a short block (default: starts 30 min after sign-off, lasts 3 h) so it doesn't fill the
+    // calendar; the title and description carry the real layover length and times.
+    let evStart = from; let evEnd = to;
+    if (opts.layoverStyle !== 'full') {
+      const offset = Number.isFinite(+opts.layoverOffsetMin) ? +opts.layoverOffsetMin : 30;
+      const dur = Number.isFinite(+opts.layoverHours) && +opts.layoverHours > 0 ? +opts.layoverHours : 3;
+      evStart = addMinutes(from, offset);
+      evEnd = addMinutes(evStart, dur * 60);
+      if (stampToUtc(evEnd) > tu) { evEnd = to; if (stampToUtc(evStart) >= tu) evStart = from; }
+    }
+    const hotel = a.last.notes && /Hotel:/.test(a.last.notes) ? a.last.notes.split('\n').find(l => l.startsWith('Hotel:')) : '';
     const body = {
       summary: t(opts, 'layover', `Layover (${hoursText(tu - fu)})`),
-      description: `Layover in ${port}\nFrom: ${describeStamp(from)}\nTo: ${describeStamp(to)}${a.last.notes && /Hotel:/.test(a.last.notes) ? `\n${a.last.notes.split('\n').find(l => l.startsWith('Hotel:'))}` : ''}\n\nManaged by Roster Manager.`,
-      start: gTime(from), end: gTime(to), transparency: 'opaque', location: port,
+      description: `Layover in ${port}\nSign off: ${describeStamp(from)}\nNext report: ${describeStamp(to)}${hotel ? `\n${hotel}` : ''}`,
+      start: gTime(evStart), end: gTime(evEnd), transparency: 'opaque', location: port,
     };
     out.push(finish(body, uniq(`L|${a.last.date}|${port}`), a.last.date, 'trip'));
   }

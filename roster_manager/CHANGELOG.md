@@ -1,3 +1,12 @@
+## 0.4.2
+- Event descriptions no longer end with the "Managed by Roster Manager" line.
+- Fix: the "Found N items" footer under Sabre's roster table no longer creates an extra all-day "Duty" event on the last day.
+- Layover events are a short block (30 min after sign-off, 3 hours) so they don't fill the calendar; the title still shows the real layover length, and the description has sign-off and next report times. "Whole layover" is available in Settings.
+
+## 0.4.1
+- Remembers the Microsoft/Sabre sign-in between captures (Virgin has no "Stay signed in"): sign-in cookies are kept encrypted between runs, like a browser that never closes. Authenticator should only be needed when Virgin's own sign-in expires.
+- The hidden browser identifies as normal desktop Chrome.
+
 ## 0.4.0
 - Separate Google calendars per event type, so each can have its own colour (e.g. in Pocket Informant): VA Day Duty, VA Trips (incl. layovers), VA Standby, VA Days Off (days off, blank, annual leave, sick), VA Sim, VA Ground.
 - Events already in the old single "VA Roster" calendar are moved into the right calendars on the next sync (no duplicates).

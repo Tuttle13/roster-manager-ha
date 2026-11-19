@@ -159,7 +159,7 @@ def wipe(keep_secrets=False):
             except FileNotFoundError:
                 pass
         if not keep_secrets:
-            for name in ("secrets.enc",):
+            for name in ("secrets.enc", "browser-cookies.enc"):
                 try:
                     (DATA / name).unlink()
                 except FileNotFoundError:
@@ -209,3 +209,35 @@ def secrets_set(**updates):
 def secrets_status():
     s = secrets_get()
     return {k + "Set": bool(s.get(k)) for k in SECRET_FIELDS}
+
+
+# ---------------- remembered browser sign-in (encrypted cookie jar) ----------------
+# Virgin's Microsoft sign-in has no "Stay signed in", so its sign-in cookie only lives as long as the
+# browser session. Keeping the cookies (session ones included) between runs is what a never-closed
+# browser (like Safari on the iPad) does. Encrypted, and excluded from all backups.
+def cookies_get():
+    path = DATA / "browser-cookies.enc"
+    if not path.exists():
+        return []
+    try:
+        return json.loads(_fernet().decrypt(path.read_bytes()))
+    except (InvalidToken, json.JSONDecodeError):
+        return []
+
+
+def cookies_set(cookies):
+    with _lock:
+        token = _fernet().encrypt(json.dumps(cookies).encode())
+        path = DATA / "browser-cookies.enc"
+        fd, tmp = tempfile.mkstemp(dir=DATA, prefix=".tmp")
+        with os.fdopen(fd, "wb") as f:
+            f.write(token)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+
+
+def cookies_clear():
+    try:
+        (DATA / "browser-cookies.enc").unlink()
+    except FileNotFoundError:
+        pass

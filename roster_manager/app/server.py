@@ -11,7 +11,7 @@ import sabre
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.4.0"
+VERSION = "0.4.2"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -225,6 +225,7 @@ async def sabre_forget(_):
         raise RuntimeError("Wait for the current run to finish.")
     import shutil
     shutil.rmtree(store.DATA / "browser", ignore_errors=True)
+    store.cookies_clear()
     store.log_add({"kind": "settings", "ok": True, "message": "Cleared the remembered Microsoft/Sabre browser session"})
     return web.json_response({"ok": True})
 

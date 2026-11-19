@@ -212,172 +212,192 @@ async def _run(job: Job, settings, secrets):
         sabre_pw = secrets.get("sabrePassword") or ""
         async with async_playwright() as p:
             job.step("Starting browser")
-            kwargs = dict(headless=True, viewport={"width": 1280, "height": 1600}, locale="en-AU",
-                          timezone_id=settings.get("browserTz") or "Australia/Sydney")
-            if os.environ.get("CHROME_PATH"):
-                kwargs["executable_path"] = os.environ["CHROME_PATH"]
-            ctx = await p.chromium.launch_persistent_context(str(store.DATA / "browser"), **kwargs)
-            page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-            page.set_default_timeout(30000)
-
-            job.step("Opening Sabre")
+            launch = {"executable_path": os.environ["CHROME_PATH"]} if os.environ.get("CHROME_PATH") else {}
+            # Identify as ordinary desktop Chrome rather than "HeadlessChrome".
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            except PWTimeout:
-                raise RuntimeError("Sabre didn't respond within 60 seconds. It may be down or overloaded. Try again later.")
-            except Exception as e:
-                raise RuntimeError(f"Couldn't reach Sabre: {str(e).splitlines()[0]}")
-
-            counts = {}
-            last_sig, sig_since = None, time.time()
-            while True:
-                if job.cancelled:
-                    raise RuntimeError("Cancelled.")
-                if time.time() - job.started > OVERALL_LIMIT:
-                    raise RuntimeError("Gave up after 5 minutes. Sabre or Microsoft didn't finish loading.")
-                await _settle(page)
-                host = urlparse(page.url).hostname or ""
-                sig = None
-
-                if host in MS_HOSTS:
-                    err = await _text(page, "#usernameError, #passwordError, #idTD_Error, .alert-error, [role=alert]")
-                    if await _visible(page, "input[name=passwd], input[type=password]"):
-                        sig = "ms-password"
-                        if counts.get(sig, 0) >= 1:
-                            await rec.snap(page, "microsoft-password-again")
-                            raise RuntimeError(f"Microsoft didn't accept the password{': ' + err if err else ''}. Update it in Settings (it may have rotated).")
-                        if not ms_pw:
-                            await rec.snap(page, "microsoft-password-needed")
-                            raise RuntimeError("Microsoft is asking for your password, but none is saved. Add it in Settings → Work logins.")
-                        await rec.snap(page, "microsoft-password")
-                        job.step("Microsoft: entering password")
-                        await _fill(page, "input[name=passwd], input[type=password]", ms_pw)
-                        await _click_submit(page)
-                    elif await _visible(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]"):
-                        sig = "ms-email"
-                        if sig == last_sig and err:
-                            raise RuntimeError(f"Microsoft rejected the email: {err}")
-                        if counts.get(sig, 0) >= 2:
-                            raise RuntimeError(f"Microsoft keeps asking for the email. {err}".strip())
-                        if not email:
-                            raise RuntimeError("Microsoft email isn't set. Add it in Settings.")
-                        await rec.snap(page, "microsoft-email")
-                        job.step("Microsoft: entering email")
-                        await _fill(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]", email)
-                        await _click_submit(page)
-                    elif await _visible(page, "#idRichContext_DisplaySign, .displaySign"):
-                        sig = "ms-number"
-                        number = await _text(page, "#idRichContext_DisplaySign, .displaySign")
-                        await rec.snap(page, "microsoft-authenticator-number")
-                        job.prompt = {"kind": "number", "value": number, "text": "Open Microsoft Authenticator on your phone and enter this number."}
-                        job.state = "waiting_mfa"
-                        job.step(f"Microsoft: waiting for Authenticator (number {number})")
-                        await _wait_leave(page, job, "#idRichContext_DisplaySign, .displaySign")
-                    elif await _visible(page, "input[name=otc], input[autocomplete=one-time-code]"):
-                        sig = "ms-code"
-                        await rec.snap(page, "microsoft-code")
-                        if counts.get(sig, 0) >= 1 and err:
-                            raise RuntimeError(f"Microsoft rejected the code: {err}")
-                        job.prompt = {"kind": "code", "text": (await _text(page, "#idDiv_SAOTCC_Description, .text-title, #idDiv_SAOTCC_Title")) or "Enter the code from Microsoft Authenticator."}
-                        job.state = "waiting_code"
-                        job.code = None
-                        job.step("Microsoft: waiting for you to enter the code")
-                        code = await _wait_code(job)
-                        job.state, job.prompt = "running", None
-                        await _fill(page, "input[name=otc], input[autocomplete=one-time-code]", code)
-                        await _click_submit(page)
-                    elif await _visible(page, "#KmsiCheckboxField, #KmsiDescription, input[name=DontShowAgain]") or "Stay signed in" in (await _text(page, "body"))[:2000]:
-                        sig = "ms-kmsi"
-                        await rec.snap(page, "microsoft-stay-signed-in")
-                        job.step("Microsoft: choosing 'Stay signed in'")
-                        cb = await _real(page, "#KmsiCheckboxField, input[name=DontShowAgain]")
-                        if cb:
-                            try:
-                                await cb.check(timeout=5000)
-                            except Exception:
-                                pass
-                        await _click_submit(page)
-                    elif "Pick an account" in (await _text(page, "body"))[:600]:
-                        sig = "ms-picker"
-                        if counts.get(sig, 0) >= 2:
-                            await rec.snap(page, "microsoft-picker-again")
-                            raise RuntimeError("Microsoft keeps showing 'Pick an account'. Try Settings → Forget remembered sign-in, then capture again.")
-                        await rec.snap(page, "microsoft-pick-account")
-                        tile = await page.evaluate_handle("""(email) => {
-                          const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
-                          const want = (email || '').toLowerCase();
-                          const tiles = [...document.querySelectorAll('[data-test-id], .table[role=button], [role=button], [role=listitem], .tile, div.table, small, div')].filter(vis);
-                          if (want) {
-                            const byId = [...document.querySelectorAll('[data-test-id]')].find(e => (e.getAttribute('data-test-id') || '').toLowerCase() === want && vis(e));
-                            if (byId) return byId;
-                            const hit = tiles.filter(e => (e.innerText || '').toLowerCase().includes(want));
-                            if (hit.length) { hit.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length); return hit[0].closest('[role=button], .table, [data-test-id], [tabindex]') || hit[0]; }
-                          }
-                          const other = [...document.querySelectorAll('[role=button], div, a')].filter(vis).find(e => /^\\s*use another account\\s*$/i.test(e.innerText || ''));
-                          return other || null;
-                        }""", email)
-                        el = tile.as_element()
-                        if not el:
-                            raise RuntimeError("Microsoft showed 'Pick an account' but the app couldn't find your account or 'Use another account'. Send the diagnostics file.")
-                        job.step("Microsoft: choosing your account")
+                probe = await p.chromium.launch(headless=True, **launch)
+                version = probe.version
+                await probe.close()
+            except Exception:
+                version = "140.0.0.0"
+            ua = f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{version} Safari/537.36"
+            kwargs = dict(headless=True, viewport={"width": 1280, "height": 1600}, locale="en-AU", user_agent=ua,
+                          timezone_id=settings.get("browserTz") or "Australia/Sydney", **launch)
+            ctx = await p.chromium.launch_persistent_context(str(store.DATA / "browser"), **kwargs)
+            try:
+                saved = store.cookies_get()
+                if saved:
+                    restored = 0
+                    for ck in saved:
                         try:
-                            await el.click(timeout=5000)
+                            await ctx.add_cookies([ck])
+                            restored += 1
                         except Exception:
-                            await el.evaluate("e => e.click()")
-                    else:
-                        body = (await _text(page, "body"))[:300]
-                        sig = "ms-other:" + body[:60]
-                        if any(w in body for w in ("Approve sign in", "Approve sign-in", "Check your Authenticator", "Open your Authenticator")):
-                            if job.state != "waiting_mfa":
-                                await rec.snap(page, "microsoft-approve")
-                            job.prompt = {"kind": "approve", "text": "Approve the sign-in request in Microsoft Authenticator on your phone."}
+                            pass
+                    job.step(f"Restored remembered sign-in ({restored} cookies)")
+                page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+                page.set_default_timeout(30000)
+
+                job.step("Opening Sabre")
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                except PWTimeout:
+                    raise RuntimeError("Sabre didn't respond within 60 seconds. It may be down or overloaded. Try again later.")
+                except Exception as e:
+                    raise RuntimeError(f"Couldn't reach Sabre: {str(e).splitlines()[0]}")
+
+                counts = {}
+                last_sig, sig_since = None, time.time()
+                while True:
+                    if job.cancelled:
+                        raise RuntimeError("Cancelled.")
+                    if time.time() - job.started > OVERALL_LIMIT:
+                        raise RuntimeError("Gave up after 5 minutes. Sabre or Microsoft didn't finish loading.")
+                    await _settle(page)
+                    host = urlparse(page.url).hostname or ""
+                    sig = None
+
+                    if host in MS_HOSTS:
+                        err = await _text(page, "#usernameError, #passwordError, #idTD_Error, .alert-error, [role=alert]")
+                        if await _visible(page, "input[name=passwd], input[type=password]"):
+                            sig = "ms-password"
+                            if counts.get(sig, 0) >= 1:
+                                await rec.snap(page, "microsoft-password-again")
+                                raise RuntimeError(f"Microsoft didn't accept the password{': ' + err if err else ''}. Update it in Settings (it may have rotated).")
+                            if not ms_pw:
+                                await rec.snap(page, "microsoft-password-needed")
+                                raise RuntimeError("Microsoft is asking for your password, but none is saved. Add it in Settings → Work logins.")
+                            await rec.snap(page, "microsoft-password")
+                            job.step("Microsoft: entering password")
+                            await _fill(page, "input[name=passwd], input[type=password]", ms_pw)
+                            await _click_submit(page)
+                        elif await _visible(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]"):
+                            sig = "ms-email"
+                            if sig == last_sig and err:
+                                raise RuntimeError(f"Microsoft rejected the email: {err}")
+                            if counts.get(sig, 0) >= 2:
+                                raise RuntimeError(f"Microsoft keeps asking for the email. {err}".strip())
+                            if not email:
+                                raise RuntimeError("Microsoft email isn't set. Add it in Settings.")
+                            await rec.snap(page, "microsoft-email")
+                            job.step("Microsoft: entering email")
+                            await _fill(page, "input[name=loginfmt]:not([type=hidden]), input[type=email]", email)
+                            await _click_submit(page)
+                        elif await _visible(page, "#idRichContext_DisplaySign, .displaySign"):
+                            sig = "ms-number"
+                            number = await _text(page, "#idRichContext_DisplaySign, .displaySign")
+                            await rec.snap(page, "microsoft-authenticator-number")
+                            job.prompt = {"kind": "number", "value": number, "text": "Open Microsoft Authenticator on your phone and enter this number."}
                             job.state = "waiting_mfa"
-                            job.step("Microsoft: waiting for you to approve in Authenticator")
-                            await _wait_leave_text(page, job, body[:40])
-                        elif time.time() - sig_since > STUCK_LIMIT and sig == last_sig:
-                            await rec.snap(page, "microsoft-unknown-page")
-                            raise RuntimeError(f"Stuck on a Microsoft page the app doesn't recognise yet: “{body[:120]}”. Send the diagnostics file to get this handled.")
+                            job.step(f"Microsoft: waiting for Authenticator (number {number})")
+                            await _wait_leave(page, job, "#idRichContext_DisplaySign, .displaySign")
+                        elif await _visible(page, "input[name=otc], input[autocomplete=one-time-code]"):
+                            sig = "ms-code"
+                            await rec.snap(page, "microsoft-code")
+                            if counts.get(sig, 0) >= 1 and err:
+                                raise RuntimeError(f"Microsoft rejected the code: {err}")
+                            job.prompt = {"kind": "code", "text": (await _text(page, "#idDiv_SAOTCC_Description, .text-title, #idDiv_SAOTCC_Title")) or "Enter the code from Microsoft Authenticator."}
+                            job.state = "waiting_code"
+                            job.code = None
+                            job.step("Microsoft: waiting for you to enter the code")
+                            code = await _wait_code(job)
+                            job.state, job.prompt = "running", None
+                            await _fill(page, "input[name=otc], input[autocomplete=one-time-code]", code)
+                            await _click_submit(page)
+                        elif await _visible(page, "#KmsiCheckboxField, #KmsiDescription, input[name=DontShowAgain]") or "Stay signed in" in (await _text(page, "body"))[:2000]:
+                            sig = "ms-kmsi"
+                            await rec.snap(page, "microsoft-stay-signed-in")
+                            job.step("Microsoft: choosing 'Stay signed in'")
+                            cb = await _real(page, "#KmsiCheckboxField, input[name=DontShowAgain]")
+                            if cb:
+                                try:
+                                    await cb.check(timeout=5000)
+                                except Exception:
+                                    pass
+                            await _click_submit(page)
+                        elif "Pick an account" in (await _text(page, "body"))[:600]:
+                            sig = "ms-picker"
+                            if counts.get(sig, 0) >= 2:
+                                await rec.snap(page, "microsoft-picker-again")
+                                raise RuntimeError("Microsoft keeps showing 'Pick an account'. Try Settings → Forget remembered sign-in, then capture again.")
+                            await rec.snap(page, "microsoft-pick-account")
+                            tile = await page.evaluate_handle("""(email) => {
+                              const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                              const want = (email || '').toLowerCase();
+                              const tiles = [...document.querySelectorAll('[data-test-id], .table[role=button], [role=button], [role=listitem], .tile, div.table, small, div')].filter(vis);
+                              if (want) {
+                                const byId = [...document.querySelectorAll('[data-test-id]')].find(e => (e.getAttribute('data-test-id') || '').toLowerCase() === want && vis(e));
+                                if (byId) return byId;
+                                const hit = tiles.filter(e => (e.innerText || '').toLowerCase().includes(want));
+                                if (hit.length) { hit.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length); return hit[0].closest('[role=button], .table, [data-test-id], [tabindex]') || hit[0]; }
+                              }
+                              const other = [...document.querySelectorAll('[role=button], div, a')].filter(vis).find(e => /^\\s*use another account\\s*$/i.test(e.innerText || ''));
+                              return other || null;
+                            }""", email)
+                            el = tile.as_element()
+                            if not el:
+                                raise RuntimeError("Microsoft showed 'Pick an account' but the app couldn't find your account or 'Use another account'. Send the diagnostics file.")
+                            job.step("Microsoft: choosing your account")
+                            try:
+                                await el.click(timeout=5000)
+                            except Exception:
+                                await el.evaluate("e => e.click()")
                         else:
-                            await asyncio.sleep(2)
-                elif await _visible(page, "input[type=password]"):
-                    sig = "sabre-login"
-                    if counts.get(sig, 0) >= 1:
-                        await rec.snap(page, "sabre-login-again")
-                        err = await _text(page, ".error, .errorMessage, .alert, [role=alert], .msg-error, #errorMessage, font[color=red]")
-                        raise RuntimeError(f"Sabre login failed{': ' + err if err else ''}. Check the Sabre User ID and password in Settings.")
-                    if not sabre_pw:
-                        await rec.snap(page, "sabre-password-needed")
-                        raise RuntimeError("Sabre is asking for your password, but none is saved. Add it in Settings → Work logins.")
-                    await rec.snap(page, "sabre-login")
-                    job.step("Sabre: logging in")
-                    uf = await _sabre_user_field(page)
-                    if uf and user_id:
-                        await uf.fill(user_id)
-                    await _fill(page, "input[type=password]", sabre_pw)
-                    if not await _click_submit_in_form(page):
-                        await page.keyboard.press("Enter")
+                            body = (await _text(page, "body"))[:300]
+                            sig = "ms-other:" + body[:60]
+                            if any(w in body for w in ("Approve sign in", "Approve sign-in", "Check your Authenticator", "Open your Authenticator")):
+                                if job.state != "waiting_mfa":
+                                    await rec.snap(page, "microsoft-approve")
+                                job.prompt = {"kind": "approve", "text": "Approve the sign-in request in Microsoft Authenticator on your phone."}
+                                job.state = "waiting_mfa"
+                                job.step("Microsoft: waiting for you to approve in Authenticator")
+                                await _wait_leave_text(page, job, body[:40])
+                            elif time.time() - sig_since > STUCK_LIMIT and sig == last_sig:
+                                await rec.snap(page, "microsoft-unknown-page")
+                                raise RuntimeError(f"Stuck on a Microsoft page the app doesn't recognise yet: “{body[:120]}”. Send the diagnostics file to get this handled.")
+                            else:
+                                await asyncio.sleep(2)
+                    elif await _visible(page, "input[type=password]"):
+                        sig = "sabre-login"
+                        if counts.get(sig, 0) >= 1:
+                            await rec.snap(page, "sabre-login-again")
+                            err = await _text(page, ".error, .errorMessage, .alert, [role=alert], .msg-error, #errorMessage, font[color=red]")
+                            raise RuntimeError(f"Sabre login failed{': ' + err if err else ''}. Check the Sabre User ID and password in Settings.")
+                        if not sabre_pw:
+                            await rec.snap(page, "sabre-password-needed")
+                            raise RuntimeError("Sabre is asking for your password, but none is saved. Add it in Settings → Work logins.")
+                        await rec.snap(page, "sabre-login")
+                        job.step("Sabre: logging in")
+                        uf = await _sabre_user_field(page)
+                        if uf and user_id:
+                            await uf.fill(user_id)
+                        await _fill(page, "input[type=password]", sabre_pw)
+                        if not await _click_submit_in_form(page):
+                            await page.keyboard.press("Enter")
+                    else:
+                        break  # signed in: no login form on screen
+
+                    if job.state == "waiting_mfa":
+                        job.state, job.prompt = "running", None
+                    if sig is not None:
+                        counts[sig] = counts.get(sig, 0) + 1
+                    if sig != last_sig:
+                        last_sig, sig_since = sig, time.time()
+                    await asyncio.sleep(1)
+
+                job.step("Signed in")
+                await rec.snap(page, "signed-in")
+                if job.mode == "test":
+                    job.result = {"ok": True}
+                    job.step("Login test passed")
                 else:
-                    break  # signed in: no login form on screen
-
-                if job.state == "waiting_mfa":
-                    job.state, job.prompt = "running", None
-                if sig is not None:
-                    counts[sig] = counts.get(sig, 0) + 1
-                if sig != last_sig:
-                    last_sig, sig_since = sig, time.time()
-                await asyncio.sleep(1)
-
-            job.step("Signed in")
-            await rec.snap(page, "signed-in")
-            if job.mode == "test":
-                job.result = {"ok": True}
-                job.step("Login test passed")
-            else:
-                data = await _roster_report(page, job, rec, settings)
-                data["period"] = job.period
-                data["debugRun"] = job.id
-                job.result = data
-                (job.dir / "capture.json").write_text(json.dumps(data))
+                    data = await _roster_report(page, job, rec, settings)
+                    data["period"] = job.period
+                    data["debugRun"] = job.id
+                    job.result = data
+                    (job.dir / "capture.json").write_text(json.dumps(data))
+            finally:
+                await _save_cookies(ctx)
             job.state = "done"
             store.log_add({"kind": "sabre", "ok": True, "message": f"Sabre {job.mode}: {job.steps[-1]['msg']}"})
     except Exception as e:
@@ -400,6 +420,16 @@ async def _run(job: Job, settings, secrets):
                 await ctx.close()
             except Exception:
                 pass
+
+
+async def _save_cookies(ctx):
+    """Keep the sign-in for next time, including session cookies a closing browser would drop."""
+    try:
+        cks = [c for c in await ctx.cookies() if c.get("domain")]
+        if cks:
+            store.cookies_set(cks)
+    except Exception:
+        pass
 
 
 async def _click_submit_in_form(page):

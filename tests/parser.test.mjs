@@ -20,6 +20,7 @@ const rows = [
   R('31OCT26','SAT','','MEL','','DDO','','','','','','','0','','',''),
   R('03NOV26','TUE','VA 0309','MEL BNE','73H','FLY','FO','0610','0712','0833','','02:21','11:11','','',''),
   R('','','VA 1234','BNE PER','73H','FLY','FO','','2330','0130','0215','05:00','','','',''),
+  R('Found 11 items, showing 1-11'),
 ];
 const capture = { format: 'prm-capture', frames: [{ text: 'Roster Report from 26OCT26 to 22NOV26\nTimes shown are in Port Local times', tables: [{ rows }] }] };
 
