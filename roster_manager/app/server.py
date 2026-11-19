@@ -1,5 +1,6 @@
 """Roster Manager HA app: web server behind Home Assistant ingress (port 8099)."""
 
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -8,10 +9,11 @@ from aiohttp import web
 
 import google_api
 import sabre
+import scheduler
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -21,6 +23,15 @@ DEFAULT_SETTINGS = {
     "msEmail": "piran.gartner@virginaustralia.com",
     "sabreUserId": "21032",
     "browserTz": "Australia/Sydney",
+    "autoEnabled": False,
+    "autoAnchorPublish": "2026-12-11",
+    "autoOffsetStart": 10,
+    "autoStartHour": 15,
+    "retryMinutes": 20,
+    "nightPauseFrom": 23,
+    "nightResume": 7,
+    "giveUpDays": 3,
+    "notifyService": "",
 }
 
 
@@ -157,8 +168,8 @@ async def creds_set(r):
     body = await r.json()
     allowed = {k: body[k] for k in ("msPassword", "sabrePassword", "googleClientSecret", "totpSecret") if k in body}
     store.secrets_set(**allowed)
-    store.log_add({"kind": "settings", "ok": True, "message": "Updated saved " + ", ".join(
-        {"msPassword": "Microsoft password", "sabrePassword": "Sabre password", "googleClientSecret": "Google client secret"}[k] for k in allowed)})
+    labels = {"msPassword": "Microsoft password", "sabrePassword": "Sabre password", "googleClientSecret": "Google client secret", "totpSecret": "authenticator key"}
+    store.log_add({"kind": "settings", "ok": True, "message": "Updated saved " + ", ".join(labels.get(k, k) for k in allowed)})
     return web.json_response(store.secrets_status())
 
 
@@ -270,15 +281,39 @@ async def g_proxy(r):
     return web.Response(status=status, body=data, content_type=(ctype or "application/json").split(";")[0])
 
 
+@routes.get("/api/auto/status")
+async def auto_status(_):
+    return web.json_response(scheduler.status())
+
+
+@routes.post("/api/auto/run-now")
+async def auto_run_now(_):
+    if sabre.busy():
+        raise RuntimeError("A capture is already running.")
+    asyncio.get_event_loop().create_task(scheduler.run_now())
+    return web.json_response({"ok": True})
+
+
+@routes.post("/api/auto/test-notify")
+async def auto_test_notify(_):
+    await scheduler.notify(settings(), "Roster Manager", "Test notification — automatic capture is set up.")
+    return web.json_response({"ok": True})
+
+
 @routes.get("/api/version")
 async def version(_):
     return web.json_response({"version": VERSION})
+
+
+async def _on_start(app):
+    scheduler.start_background()
 
 
 def make_app():
     app = web.Application(middlewares=[guard], client_max_size=50 * 1024 * 1024)
     app.add_routes(routes)
     app.router.add_static("/", WWW, show_index=False)
+    app.on_startup.append(_on_start)
     return app
 
 

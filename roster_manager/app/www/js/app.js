@@ -6,7 +6,7 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle, CATEGORIES } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.5.0 (Home Assistant)';
+export const APP_VERSION = '0.6.0 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
@@ -709,6 +709,30 @@ async function viewSettings() {
       <button class="btn" id="saveTz">Save time zones</button>
     </section>
     <section class="panel">
+      <h3>Automatic capture</h3>
+      <p class="muted">Each new roster is published on a Friday afternoon and every 4 weeks after. With this on, the app fetches that new period on publication day (first try at a random time between ${settings.autoStartHour || 15}:00 and ${(settings.autoStartHour || 15) + 1}:00), retrying every ${settings.retryMinutes || 20} min if Sabre is down, then adds it to your calendar and backs it up — no taps. It only adds and updates; it never deletes. Needs the work passwords saved, Google connected, and (for a no-phone run) the authenticator key above.</p>
+      <label class="check"><input type="checkbox" id="autoEnabled" ${settings.autoEnabled ? 'checked' : ''}> Turn on automatic Friday capture</label>
+      <div class="row">
+        <label>Next roster is published<input id="autoAnchor" type="date" value="${esc(settings.autoAnchorPublish || '2026-12-11')}"></label>
+        <label>Days from publish to roster start<input id="autoOffset" type="number" min="0" max="28" value="${settings.autoOffsetStart ?? 10}"></label>
+      </div>
+      <div class="row">
+        <label>First-attempt hour (24h)<input id="autoHour" type="number" min="0" max="23" value="${settings.autoStartHour ?? 15}"></label>
+        <label>Retry every (minutes)<input id="retryMin" type="number" min="5" max="180" value="${settings.retryMinutes ?? 20}"></label>
+      </div>
+      <div class="row">
+        <label>Keep retrying for (days)<input id="giveUp" type="number" min="0" max="7" value="${settings.giveUpDays ?? 3}"></label>
+        <label>Phone notification service<input id="notifySvc" value="${esc(settings.notifyService || '')}" placeholder="e.g. mobile_app_pixel_8"></label>
+      </div>
+      <p class="muted">Notifications (optional): the Home Assistant notify service for your phone, without the <code>notify.</code> prefix. Leave blank for none. Overnight (${settings.nightPauseFrom ?? 23}:00–${settings.nightResume ?? 7}:00) it pauses retrying.</p>
+      <div class="toolbar">
+        <button class="btn primary" id="saveAuto">Save</button>
+        <button class="btn" id="runAuto">Run the automatic capture now</button>
+        ${settings.notifyService ? '<button class="btn" id="testNotify">Send a test notification</button>' : ''}
+      </div>
+      <div id="autoStatus" class="muted"></div>
+    </section>
+    <section class="panel">
       <h3>About</h3>
       <p>Last capture: ${lastCapture ? `${esc(prettyRange(lastCapture.start, lastCapture.end))} (${esc(fmtWhen(lastCapture.at))})` : '—'}</p>
       <p>Version ${APP_VERSION}</p>
@@ -824,6 +848,43 @@ async function viewSettings() {
     if (bad.length) { toast(`Not valid: ${bad.join(', ')}`, 'error', 7000); return; }
     await saveSettings({ tzOverrides: map }); toast('Time zones saved.');
   });
+  $('#saveAuto')?.addEventListener('click', async () => {
+    await saveSettings({
+      autoEnabled: $('#autoEnabled').checked,
+      autoAnchorPublish: $('#autoAnchor').value,
+      autoOffsetStart: +$('#autoOffset').value || 10,
+      autoStartHour: Math.max(0, Math.min(23, +$('#autoHour').value || 15)),
+      retryMinutes: Math.max(5, +$('#retryMin').value || 20),
+      giveUpDays: Math.max(0, +$('#giveUp').value || 3),
+      notifyService: $('#notifySvc').value.trim().replace(/^notify\./, ''),
+    });
+    toast('Saved.', 'ok');
+    refreshAutoStatus();
+  });
+  $('#runAuto')?.addEventListener('click', async ev => {
+    if (!(await confirmBox('Run the automatic capture now? It fetches the next roster period and adds it to your calendar.', 'Run'))) return;
+    setBusy(ev.currentTarget, true, 'Starting…');
+    try { await api('auto/run-now', { method: 'POST' }); toast('Started. Watch the Capture tab or the status below.', 'ok', 6000); } catch (e) { toast(e.message, 'error'); }
+    setBusy(ev.currentTarget, false);
+    setTimeout(refreshAutoStatus, 2000);
+  });
+  $('#testNotify')?.addEventListener('click', async () => {
+    try { await api('auto/test-notify', { method: 'POST' }); toast('Test notification sent.', 'ok'); } catch (e) { toast(e.message, 'error'); }
+  });
+  async function refreshAutoStatus() {
+    try {
+      const st = await api('auto/status');
+      const el = $('#autoStatus'); if (!el) return;
+      const bits = [];
+      if (st.next) bits.push(`Next publication: ${esc(prettyRange(st.next.period.start, st.next.period.end))}${st.nextFirstAttempt ? `, first try ${esc(fmtWhen(st.nextFirstAttempt))}` : ''}.`);
+      if (st.state?.status === 'retrying' && st.state?.nextAttemptAt) bits.push(`Retrying — next attempt ${esc(fmtWhen(st.state.nextAttemptAt))}.`);
+      if (st.state?.status === 'done') bits.push('This cycle is captured.');
+      if (st.state?.status === 'failed') bits.push(`Last run needs you: ${esc(st.state.lastError || '')}`);
+      if (st.lastResult && !st.lastResult.ok) bits.push(`Last attempt: ${esc(st.lastResult.error || '')}`);
+      el.innerHTML = bits.join(' ') || (st.enabled ? 'On.' : 'Off.');
+    } catch { /* ignore */ }
+  }
+  refreshAutoStatus();
   $('#wipe').addEventListener('click', async () => {
     if (!(await confirmBox('Erase all rosters, history, settings, saved passwords and the Google connection from the app? Google Calendar and Drive are not touched.', 'Erase', true))) return;
     await wipeAll(); await loadSettings(); toast('Erased.'); nav('#/');

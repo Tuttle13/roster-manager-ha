@@ -1,3 +1,9 @@
+## 0.6.0
+- Automatic Friday capture: on each publication day (every 4 weeks) the app fetches the new 28-day roster on its own, retrying every 20 minutes if Sabre is crashing, then adds it to Google Calendar and backs it up — fully unattended. It only adds/updates, never deletes. Overnight pause and a give-up window are configurable.
+- Optional phone notifications via a Home Assistant notify service (roster added / needs attention).
+- "Run the automatic capture now" button. The manual Capture tab (custom dates, review, sync) is unchanged.
+- Server-side sync reuses the same parser and event logic as the panel.
+
 ## 0.5.0
 - Optional automatic Authenticator code: store your Microsoft authenticator setup key (encrypted, excluded from backups) and the app generates the verification code itself, so a capture never needs your phone. Also switches a number-match prompt to a verification code when needed. Leave it unset to keep using your phone. Note: this keeps both factors on the server and is likely against employer IT policy.
 - Settings → Work logins → "Automatic Authenticator code" with a Check key button.

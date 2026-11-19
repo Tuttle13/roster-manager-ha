@@ -11,3 +11,6 @@ Opens **Roster** in the Home Assistant sidebar. Press **Capture Roster** and the
 - Passwords and the Google token are encrypted in the app's private storage. They're never shown again or logged, and are excluded from Home Assistant backups and Google Drive backups.
 - The app can only reach the Google calendar and Drive files it created itself.
 - Diagnostics (screenshots and page layout, no passwords or form values) are kept for the last 6 runs, and can be downloaded from the panel.
+
+## Automatic capture (optional)
+Settings → **Automatic capture**. With it on, the app fetches each newly published roster on its Friday and adds it to your calendar with no taps: first attempt at a random time in the chosen hour, retrying every 20 minutes if Sabre is down (pausing overnight), giving up after a few days. It only adds and updates events — it never deletes. Needs the work passwords saved, Google connected, and the authenticator key set for a no-phone run. Set a **phone notification service** (your Home Assistant mobile app notify service, without the `notify.` prefix) to be told when the roster lands or if it needs you.

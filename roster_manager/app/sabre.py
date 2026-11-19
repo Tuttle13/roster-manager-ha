@@ -72,7 +72,7 @@ def _fresh_totp(secret):
 
 
 class Job:
-    def __init__(self, mode, period):
+    def __init__(self, mode, period, auto=False):
         self.id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         self.mode = mode            # 'capture' or 'test'
         self.period = period
@@ -86,6 +86,7 @@ class Job:
         self.cancelled = False
         self.code = None            # code typed in by the user for an MFA code prompt
         self.decision = None        # 'ack' or 'stop' for a Notice Board prompt
+        self.auto = auto            # unattended scheduled run: resolve safe prompts automatically
         self.shot = None            # latest screenshot file name
         self.dir = DEBUG_DIR / self.id
 
@@ -107,11 +108,11 @@ def busy():
     return current is not None and current.state in ("running", "waiting_mfa", "waiting_code", "waiting_ack")
 
 
-def start(mode, period, settings, secrets):
+def start(mode, period, settings, secrets, auto=False):
     global current
     if busy():
         raise RuntimeError("A Sabre run is already in progress.")
-    current = Job(mode, period)
+    current = Job(mode, period, auto=auto)
     asyncio.get_running_loop().create_task(_run(current, settings, secrets))
     return current
 
@@ -690,7 +691,9 @@ async def _notice_board(page, job, rec):
         rest = rest.replace(lab, " ")
     rest = re.sub(r"\s+", " ", rest).strip()
     await rec.snap(page, "notice-board")
-    if rest:
+    if rest and job.auto:
+        job.step("Sabre Notice Board has notices: acknowledging automatically (unattended run)")
+    elif rest:
         notice = re.sub(r"[ \t]+", " ", body).strip()
         job.prompt = {"kind": "notice", "text": notice[:3000]}
         job.state = "waiting_ack"
