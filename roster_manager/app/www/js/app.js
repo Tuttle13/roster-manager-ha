@@ -6,7 +6,7 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle, CATEGORIES } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.4.2 (Home Assistant)';
+export const APP_VERSION = '0.5.0 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
@@ -639,6 +639,12 @@ async function viewSettings() {
         <label>Sabre User ID<input id="sabreUserId" value="${esc(settings.sabreUserId)}" autocomplete="off"></label>
         ${pw('sabrePassword', 'Sabre password', creds.sabrePasswordSet)}
       </div>
+      <details><summary>Automatic Authenticator code (fully unattended logins)</summary>
+        <p class="muted">Lets the app generate the Microsoft verification code itself, so a capture never needs your phone. This keeps your work password and second factor together on this server, which weakens two-factor protection and is likely against Virgin's IT policy — set it up only if you accept that. In Microsoft security settings, add an authenticator app, choose "I want to use a different authenticator app", and copy the setup key it shows (a string of letters and numbers).</p>
+        ${pw('totpSecret', 'Authenticator setup key', creds.totpSecretSet)}
+        <button class="btn" type="button" id="checkTotp">Check key</button>
+        <span id="totpMsg" class="muted"></span>
+      </details>
       <p class="muted">Passwords are encrypted on your Home Assistant box. They're never shown again, never written to logs, and excluded from Home Assistant and Google Drive backups. Leave a password box empty to keep the saved one.</p>
       <label>Sabre address<input id="sabreUrl" type="url" value="${esc(settings.sabreUrl)}"></label>
       <div class="toolbar">
@@ -709,6 +715,14 @@ async function viewSettings() {
       <button class="btn danger" id="wipe">Erase all app data</button>
     </section>`;
 
+  $('#checkTotp')?.addEventListener('click', async () => {
+    const secret = $('#totpSecret').value.trim();
+    if (!secret) { $('#totpMsg').textContent = 'Paste the setup key first.'; return; }
+    try {
+      const r = await api('creds/check-totp', { method: 'POST', body: { secret } });
+      $('#totpMsg').textContent = r.valid ? `Looks valid — code right now is ${r.preview}. Check it matches your authenticator app, then Save.` : 'That key is not valid. Copy the setup key exactly as Microsoft shows it.';
+    } catch (e) { $('#totpMsg').textContent = e.message; }
+  });
   $$('[data-toggle]').forEach(b => b.addEventListener('click', () => {
     const i = $(`#${b.dataset.toggle}`); i.type = i.type === 'password' ? 'text' : 'password'; b.textContent = i.type === 'password' ? 'Show' : 'Hide';
   }));
@@ -722,6 +736,7 @@ async function viewSettings() {
     const body = {};
     if ($('#msPassword').value) body.msPassword = $('#msPassword').value;
     if ($('#sabrePassword').value) body.sabrePassword = $('#sabrePassword').value;
+    if ($('#totpSecret') && $('#totpSecret').value) body.totpSecret = $('#totpSecret').value.trim();
     if (Object.keys(body).length) await api('creds', { method: 'PUT', body });
     $('#msPassword').value = ''; $('#sabrePassword').value = '';
   };

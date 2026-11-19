@@ -16,7 +16,7 @@ STATE = DATA / "state"
 CAPS = STATE / "captures"
 _lock = threading.RLock()
 
-SECRET_FIELDS = ("msPassword", "sabrePassword", "googleClientSecret", "googleRefreshToken")
+SECRET_FIELDS = ("msPassword", "sabrePassword", "googleClientSecret", "googleRefreshToken", "totpSecret")
 
 
 def now_iso():

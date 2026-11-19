@@ -37,6 +37,40 @@ DEBUG_DIR = store.DATA / "debug"
 KEEP_DEBUG_RUNS = 6
 
 
+import hmac
+import hashlib
+import struct
+import base64
+
+
+def totp_code(secret, at=None, digits=6, period=30):
+    """Standard RFC 6238 TOTP (the same 6-digit codes an authenticator app shows)."""
+    clean = re.sub(r"\s+", "", secret or "").upper()
+    if not clean:
+        return None
+    pad = "=" * ((8 - len(clean) % 8) % 8)
+    try:
+        key = base64.b32decode(clean + pad)
+    except Exception:
+        return None
+    counter = int((at if at is not None else time.time()) // period)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    off = digest[-1] & 0x0F
+    val = (struct.unpack(">I", digest[off:off + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(val).zfill(digits)
+
+
+def totp_valid(secret):
+    return totp_code(secret) is not None
+
+
+def _fresh_totp(secret):
+    """Return a code that has at least a few seconds of life left, so it isn't rejected at a boundary."""
+    if int(time.time()) % 30 >= 27:
+        time.sleep(30 - (int(time.time()) % 30) + 1)
+    return totp_code(secret)
+
+
 class Job:
     def __init__(self, mode, period):
         self.id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -210,6 +244,7 @@ async def _run(job: Job, settings, secrets):
         user_id = settings.get("sabreUserId") or ""
         ms_pw = secrets.get("msPassword") or ""
         sabre_pw = secrets.get("sabrePassword") or ""
+        totp = secrets.get("totpSecret") or ""
         async with async_playwright() as p:
             job.step("Starting browser")
             launch = {"executable_path": os.environ["CHROME_PATH"]} if os.environ.get("CHROME_PATH") else {}
@@ -285,6 +320,10 @@ async def _run(job: Job, settings, secrets):
                             await _click_submit(page)
                         elif await _visible(page, "#idRichContext_DisplaySign, .displaySign"):
                             sig = "ms-number"
+                            if totp and await _switch_to_code(page):
+                                job.step("Microsoft: switching to a verification code")
+                                await asyncio.sleep(1)
+                                continue
                             number = await _text(page, "#idRichContext_DisplaySign, .displaySign")
                             await rec.snap(page, "microsoft-authenticator-number")
                             job.prompt = {"kind": "number", "value": number, "text": "Open Microsoft Authenticator on your phone and enter this number."}
@@ -294,16 +333,23 @@ async def _run(job: Job, settings, secrets):
                         elif await _visible(page, "input[name=otc], input[autocomplete=one-time-code]"):
                             sig = "ms-code"
                             await rec.snap(page, "microsoft-code")
-                            if counts.get(sig, 0) >= 1 and err:
-                                raise RuntimeError(f"Microsoft rejected the code: {err}")
-                            job.prompt = {"kind": "code", "text": (await _text(page, "#idDiv_SAOTCC_Description, .text-title, #idDiv_SAOTCC_Title")) or "Enter the code from Microsoft Authenticator."}
-                            job.state = "waiting_code"
-                            job.code = None
-                            job.step("Microsoft: waiting for you to enter the code")
-                            code = await _wait_code(job)
-                            job.state, job.prompt = "running", None
-                            await _fill(page, "input[name=otc], input[autocomplete=one-time-code]", code)
-                            await _click_submit(page)
+                            if totp:
+                                if counts.get(sig, 0) >= 2:
+                                    raise RuntimeError(f"Microsoft rejected the generated code{': ' + err if err else ''}. Check the authenticator key in Settings.")
+                                job.step("Microsoft: entering the generated verification code")
+                                await _fill(page, "input[name=otc], input[autocomplete=one-time-code]", _fresh_totp(totp))
+                                await _click_submit(page)
+                            else:
+                                if counts.get(sig, 0) >= 1 and err:
+                                    raise RuntimeError(f"Microsoft rejected the code: {err}")
+                                job.prompt = {"kind": "code", "text": (await _text(page, "#idDiv_SAOTCC_Description, .text-title, #idDiv_SAOTCC_Title")) or "Enter the code from Microsoft Authenticator."}
+                                job.state = "waiting_code"
+                                job.code = None
+                                job.step("Microsoft: waiting for you to enter the code")
+                                code = await _wait_code(job)
+                                job.state, job.prompt = "running", None
+                                await _fill(page, "input[name=otc], input[autocomplete=one-time-code]", code)
+                                await _click_submit(page)
                         elif await _visible(page, "#KmsiCheckboxField, #KmsiDescription, input[name=DontShowAgain]") or "Stay signed in" in (await _text(page, "body"))[:2000]:
                             sig = "ms-kmsi"
                             await rec.snap(page, "microsoft-stay-signed-in")
@@ -345,7 +391,12 @@ async def _run(job: Job, settings, secrets):
                         else:
                             body = (await _text(page, "body"))[:300]
                             sig = "ms-other:" + body[:60]
-                            if any(w in body for w in ("Approve sign in", "Approve sign-in", "Check your Authenticator", "Open your Authenticator")):
+                            if any(w in body for w in ("Approve sign in", "Approve sign-in", "Check your Authenticator", "Open your Authenticator", "Verify your identity", "How would you like")):
+                                if totp and counts.get("ms-switch", 0) < 2 and await _switch_to_code(page):
+                                    counts["ms-switch"] = counts.get("ms-switch", 0) + 1
+                                    job.step("Microsoft: switching to a verification code")
+                                    await asyncio.sleep(1)
+                                    continue
                                 if job.state != "waiting_mfa":
                                     await rec.snap(page, "microsoft-approve")
                                 job.prompt = {"kind": "approve", "text": "Approve the sign-in request in Microsoft Authenticator on your phone."}
@@ -420,6 +471,37 @@ async def _run(job: Job, settings, secrets):
                 await ctx.close()
             except Exception:
                 pass
+
+
+async def _switch_to_code(page):
+    """On a 'number matching'/push screen, move to the 'enter a verification code' method.
+    Clicks links such as 'I can't use my Microsoft Authenticator app right now' /
+    'Use a verification code' / 'Sign in another way', and picks the code option if a list appears."""
+    clicked = await page.evaluate("""() => {
+      const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const rx = /verification code|use a code|different method|another way|can.?t use|other ways? to sign in|use.*authenticator app instead/i;
+      const els = [...document.querySelectorAll('a, button, [role=button], div.table, [data-value], span')].filter(vis);
+      const hit = els.find(e => rx.test((e.innerText || e.textContent || '').trim()));
+      if (hit) { (hit.closest('a,button,[role=button],.table,[data-value]') || hit).click(); return true; }
+      return false;
+    }""")
+    if not clicked:
+        return False
+    await _settle(page)
+    # A method list may appear: choose the verification-code option. Optional, and the click above
+    # may already be navigating, so ignore a destroyed-context error here.
+    try:
+        await page.evaluate("""() => {
+          const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+          const rx = /verification code|code from.*authenticator|use a code|totp|one-time/i;
+          const els = [...document.querySelectorAll('[role=button], .table, [data-value], button, a, li, div')].filter(vis);
+          const hit = els.find(e => rx.test((e.innerText || e.textContent || '').trim()));
+          if (hit) (hit.closest('[role=button],.table,[data-value],button,a,li') || hit).click();
+        }""")
+        await _settle(page)
+    except Exception:
+        pass
+    return True
 
 
 async def _save_cookies(ctx):

@@ -1,3 +1,7 @@
+## 0.5.0
+- Optional automatic Authenticator code: store your Microsoft authenticator setup key (encrypted, excluded from backups) and the app generates the verification code itself, so a capture never needs your phone. Also switches a number-match prompt to a verification code when needed. Leave it unset to keep using your phone. Note: this keeps both factors on the server and is likely against employer IT policy.
+- Settings → Work logins → "Automatic Authenticator code" with a Check key button.
+
 ## 0.4.2
 - Event descriptions no longer end with the "Managed by Roster Manager" line.
 - Fix: the "Found N items" footer under Sabre's roster table no longer creates an extra all-day "Duty" event on the last day.

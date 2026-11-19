@@ -11,7 +11,7 @@ import sabre
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.4.2"
+VERSION = "0.5.0"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -144,10 +144,18 @@ async def creds_status(_):
     return web.json_response(store.secrets_status())
 
 
+@routes.post("/api/creds/check-totp")
+async def creds_check_totp(r):
+    import sabre
+    secret = str((await r.json()).get("secret", ""))
+    code = sabre.totp_code(secret)
+    return web.json_response({"valid": code is not None, "preview": code})
+
+
 @routes.put("/api/creds")
 async def creds_set(r):
     body = await r.json()
-    allowed = {k: body[k] for k in ("msPassword", "sabrePassword", "googleClientSecret") if k in body}
+    allowed = {k: body[k] for k in ("msPassword", "sabrePassword", "googleClientSecret", "totpSecret") if k in body}
     store.secrets_set(**allowed)
     store.log_add({"kind": "settings", "ok": True, "message": "Updated saved " + ", ".join(
         {"msPassword": "Microsoft password", "sabrePassword": "Sabre password", "googleClientSecret": "Google client secret"}[k] for k in allowed)})
