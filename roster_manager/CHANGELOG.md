@@ -1,3 +1,8 @@
+## 0.4.0
+- Separate Google calendars per event type, so each can have its own colour (e.g. in Pocket Informant): VA Day Duty, VA Trips (incl. layovers), VA Standby, VA Days Off (days off, blank, annual leave, sick), VA Sim, VA Ground.
+- Events already in the old single "VA Roster" calendar are moved into the right calendars on the next sync (no duplicates).
+- Sick leave shows as 🤒 Sick Leave.
+
 ## 0.3.1
 - Handles Microsoft's "Pick an account" screen (chooses your work account, or "Use another account").
 

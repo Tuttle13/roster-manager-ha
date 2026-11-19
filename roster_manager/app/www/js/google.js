@@ -98,20 +98,29 @@ export async function listAppEvents(calendarId, period) {
     });
     if (pageToken) p.set('pageToken', pageToken);
     const r = await gfetch(`${CAL}/calendars/${encodeURIComponent(calendarId)}/events?${p}`);
-    out.push(...(r.items || []));
+    out.push(...(r.items || []).map(ev => ({ ...ev, calendarId })));
     pageToken = r.nextPageToken || '';
   } while (pageToken);
   return out;
 }
 
-export async function executePlan(calendarId, plan, approvedRemovalIds, onProgress = () => {}) {
-  const base = `${CAL}/calendars/${encodeURIComponent(calendarId)}/events`;
+// Each plan item says which calendar it belongs in (x.calendarId); existing events carry the
+// calendar they're in now (event.calendarId). A changed category moves the event between calendars.
+export async function executePlan(defaultCalendarId, plan, approvedRemovalIds, onProgress = () => {}) {
+  const evs = cal => `${CAL}/calendars/${encodeURIComponent(cal || defaultCalendarId)}/events`;
+  const del = (cal, id) => gfetch(`${evs(cal)}/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(e => { if (e.status === 410 || e.status === 404) return null; throw e; });
   const ops = [
-    ...plan.create.map(x => ({ kind: 'create', label: x.body.summary, date: x.duty.date, run: () => gfetch(base, { method: 'POST', body: JSON.stringify(x.body) }) })),
-    ...plan.update.map(x => ({ kind: 'update', label: x.body.summary, date: x.duty.date, run: () => gfetch(`${base}/${encodeURIComponent(x.event.id)}`, { method: 'PUT', body: JSON.stringify(x.body) }) })),
+    ...plan.create.map(x => ({ kind: 'create', label: x.body.summary, date: x.duty.date, run: () => gfetch(evs(x.calendarId), { method: 'POST', body: JSON.stringify(x.body) }) })),
+    ...plan.update.map(x => ({
+      kind: x.moved ? 'move' : 'update', label: x.body.summary, date: x.duty.date,
+      run: async () => {
+        if (x.moved) { await gfetch(evs(x.calendarId), { method: 'POST', body: JSON.stringify(x.body) }); return del(x.event.calendarId, x.event.id); }
+        return gfetch(`${evs(x.event.calendarId || x.calendarId)}/${encodeURIComponent(x.event.id)}`, { method: 'PUT', body: JSON.stringify(x.body) });
+      },
+    })),
     ...plan.remove.filter(x => approvedRemovalIds.has(x.event.id)).map(x => ({
       kind: 'remove', label: x.event.summary, date: x.event.extendedProperties?.private?.prmDate,
-      run: () => gfetch(`${base}/${encodeURIComponent(x.event.id)}`, { method: 'DELETE' }).catch(e => { if (e.status === 410 || e.status === 404) return null; throw e; }),
+      run: () => del(x.event.calendarId, x.event.id),
     })),
   ];
   const results = [];

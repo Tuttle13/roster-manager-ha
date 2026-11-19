@@ -3,10 +3,10 @@ import { defaultPeriod, validatePeriod, periodEnd, prettyDate, prettyRange, addD
 import { setOverrides, isValidTz, tzFor, stampToUtc, utcToZoned } from './tz.js';
 import { DUTY_TYPES, newDuty, validateRoster, validateDuty, sortDuties, assignKeys, isAllDay } from './model.js';
 import { readClipboardPayload, parseCapture, captureText } from './parser.js';
-import { planSync, eventTitle } from './events.js';
+import { planSync, eventTitle, CATEGORIES } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.3.1 (Home Assistant)';
+export const APP_VERSION = '0.4.0 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
@@ -21,6 +21,8 @@ const DEFAULT_SETTINGS = {
   googleClientId: '',
   calendarName: 'VA Roster',
   calendarId: '',
+  splitCalendars: true,
+  calendars: {},
   drive: null,
   driveRootName: 'My Roster',
   includeDaysOff: true,
@@ -494,7 +496,7 @@ async function viewSync(id) {
   const ret = `#/sync/${c.id}`;
   main.innerHTML = `
     <h2>Sync to Google Calendar</h2>
-    <p class="muted">${esc(prettyRange(c.period.start, c.period.end))} · ${c.duties.length} duties · calendar “${esc(settings.calendarName)}”</p>
+    <p class="muted">${esc(prettyRange(c.period.start, c.period.end))} · ${c.duties.length} duties · ${settings.splitCalendars !== false ? 'calendars VA Flying, VA Layovers, VA Days Off…' : `calendar “${esc(settings.calendarName)}”`}</p>
     ${googleSignInBlock(ret, 'compare with your calendar')}
     <div id="planArea">${googleReady().ok ? '<button class="btn primary" id="prepare">Compare with calendar</button>' : ''}</div>
     <div id="resultArea"></div>`;
@@ -507,14 +509,33 @@ async function preparePlan(c, btn) {
   setBusy(btn, true, 'Comparing…');
   try {
     const tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Australia/Sydney';
-    const cal = await G.ensureCalendar(settings.calendarId, settings.calendarName, tzName);
-    if (cal.id !== settings.calendarId) await saveSettings({ calendarId: cal.id });
-    const existing = await G.listAppEvents(cal.id, c.period);
+    const split = settings.splitCalendars !== false;
+    const cals = { ...(settings.calendars || {}) };
+    let single = null;
+    const existing = [];
+    if (split) {
+      for (const [cat, info] of Object.entries(CATEGORIES)) {
+        const cal = await G.ensureCalendar(cals[cat], info.name, tzName);
+        cals[cat] = cal.id;
+        existing.push(...await G.listAppEvents(cal.id, c.period));
+      }
+      await saveSettings({ calendars: cals });
+      // Events from the earlier single calendar are found and moved into the right calendars.
+      if (settings.calendarId && !Object.values(cals).includes(settings.calendarId)) {
+        try { existing.push(...await G.listAppEvents(settings.calendarId, c.period)); } catch (e) { if (e instanceof G.AuthError) throw e; }
+      }
+    } else {
+      const cal = await G.ensureCalendar(settings.calendarId, settings.calendarName, tzName);
+      if (cal.id !== settings.calendarId) await saveSettings({ calendarId: cal.id });
+      single = cal.id;
+      existing.push(...await G.listAppEvents(cal.id, c.period));
+    }
+    const cal = { id: single || cals.day };
     let duties = c.duties.filter(d => validateDuty(d, c.period).errors.length === 0);
     if (!settings.includeDaysOff) duties = duties.filter(d => d.type !== 'DAY_OFF');
     if (!settings.includeDaysOff) duties = duties.filter(d => !(d.type === 'OTHER' && /^BLANK$/i.test(d.code || '')));
     const keyed = assignKeys(duties);
-    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy, homeBase: settings.homeBase || 'MEL', emoji: settings.emojiTitles !== false, flightSpan: settings.flightSpan || 'duty' });
+    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy, homeBase: settings.homeBase || 'MEL', emoji: settings.emojiTitles !== false, flightSpan: settings.flightSpan || 'duty', calFor: cat => (split ? cals[cat] : single) });
     currentPlan = { captureId: c.id, calendarId: cal.id, plan, keyed };
     renderPlan(c, currentPlan);
   } catch (e) {
@@ -535,8 +556,8 @@ function renderPlan(c, { plan }) {
         <div><b>${plan.remove.length}</b><span>removed from roster</span></div>
       </div>
       ${plan.create.length ? `<details open><summary>New events (${plan.create.length})</summary><ul>${plan.create.map(x => item(x)).join('')}</ul></details>` : ''}
-      ${plan.update.length ? `<details open><summary>Changed events (${plan.update.length})</summary><ul>${plan.update.map(x => item(x, x.event.summary !== x.body.summary ? `<span class="muted">(was ${esc(x.event.summary)})</span>` : '<span class="muted">(times/details changed)</span>')).join('')}</ul></details>` : ''}
-      ${plan.remove.length ? `<div class="removals"><h4>No longer on the roster</h4><p class="muted">Ticked events will be deleted from the “${esc(settings.calendarName)}” calendar. Unticked ones are left alone.</p>
+      ${plan.update.length ? `<details open><summary>Changed events (${plan.update.length})</summary><ul>${plan.update.map(x => item(x, x.moved ? `<span class="muted">(moving to ${esc(CATEGORIES[x.cat]?.name || 'its calendar')})</span>` : x.event.summary !== x.body.summary ? `<span class="muted">(was ${esc(x.event.summary)})</span>` : '<span class="muted">(times/details changed)</span>')).join('')}</ul></details>` : ''}
+      ${plan.remove.length ? `<div class="removals"><h4>No longer on the roster</h4><p class="muted">Ticked events will be deleted from your roster calendars. Unticked ones are left alone.</p>
         ${plan.remove.map(x => `<label class="check"><input type="checkbox" data-remove="${esc(x.event.id)}" ${x.duplicate ? 'checked' : ''}> ${esc(prettyDate(x.event.extendedProperties.private.prmDate))} · ${esc(x.event.summary)} <span class="muted">(${esc(x.reason)})</span></label>`).join('')}</div>` : ''}
       ${changes ? '<button class="btn primary wide" id="apply">Apply changes to calendar</button>' : '<div class="notice ok">Calendar already matches this roster.</div><button class="btn wide" id="apply">Finish (back up to Drive)</button>'}
       <div id="progress"></div>
@@ -559,6 +580,7 @@ async function applyPlan(c, btn) {
     at: new Date().toISOString(), ok: failed.length === 0, captureId: c.id,
     created: results.filter(r => r.ok && r.kind === 'create').length,
     updated: results.filter(r => r.ok && r.kind === 'update').length,
+    moved: results.filter(r => r.ok && r.kind === 'move').length,
     removed: results.filter(r => r.ok && r.kind === 'remove').length,
     failed: failed.length, keptRemovals: plan.remove.length - approved.size,
   };
@@ -567,10 +589,10 @@ async function applyPlan(c, btn) {
   c.syncedAt = summary.at;
   await captures.put(c);
   await kv.set('lastSync', summary);
-  await log.add({ kind: 'sync', ok: summary.ok, captureId: c.id, message: `Calendar sync: ${summary.created} added, ${summary.updated} updated, ${summary.removed} removed${failed.length ? `, ${failed.length} failed` : ''}` });
+  await log.add({ kind: 'sync', ok: summary.ok, captureId: c.id, message: `Calendar sync: ${summary.created} added, ${summary.updated} updated, ${summary.moved ? `${summary.moved} moved, ` : ''}${summary.removed} removed${failed.length ? `, ${failed.length} failed` : ''}` });
   currentPlan = null;
 
-  prog.innerHTML = `<div class="notice ${failed.length ? 'error' : 'ok'}">Calendar: ${summary.created} added, ${summary.updated} updated, ${summary.removed} removed${failed.length ? `, <b>${failed.length} failed</b>` : ''}.</div>
+  prog.innerHTML = `<div class="notice ${failed.length ? 'error' : 'ok'}">Calendar: ${summary.created} added, ${summary.updated} updated, ${summary.moved ? `${summary.moved} moved to their own calendars, ` : ''}${summary.removed} removed${failed.length ? `, <b>${failed.length} failed</b>` : ''}.</div>
     ${failed.length ? `<ul class="failures">${failed.map(f => `<li>${esc(f.kind)} ${esc(f.label)}: ${esc(f.error)}</li>`).join('')}</ul><p>Nothing else was changed. Tap <b>Compare with calendar</b> again to retry only what's left.</p>` : ''}
     <p id="backupMsg" class="muted">Backing up to Google Drive…</p>`;
   const b = await backupToDrive(c, step => { const el = $('#backupMsg'); if (el) el.textContent = step; });
@@ -645,8 +667,9 @@ async function viewSettings() {
     </section>
     <section class="panel">
       <h3>Google Calendar</h3>
-      <label>Calendar name<input id="calName" value="${esc(settings.calendarName)}"></label>
-      <p class="muted">${settings.calendarId ? `Using calendar <code>${esc(settings.calendarId)}</code>` : 'Created on first sync.'} The app can only see and change calendars it created itself.</p>
+      <label class="check"><input type="checkbox" id="split" ${settings.splitCalendars !== false ? 'checked' : ''}> A separate calendar for each event type, so each can have its own colour in Pocket Informant: ${Object.values(CATEGORIES).map(c => esc(c.name)).join(', ')}</label>
+      <label>Single calendar name (when not separate)<input id="calName" value="${esc(settings.calendarName)}"></label>
+      <p class="muted">Calendars are created on the next sync. The app can only see and change calendars it created itself. Events also get a Google colour by type.</p>
       <label class="check"><input type="checkbox" id="incOff" ${settings.includeDaysOff ? 'checked' : ''}> Add days off and blank days to the calendar</label>
       <label class="check"><input type="checkbox" id="offBusy" ${settings.daysOffBusy ? 'checked' : ''}> Show days off/leave as busy</label>
       <label class="check"><input type="checkbox" id="emoji" ${settings.emojiTitles !== false ? 'checked' : ''}> Icons in event titles (✈️ 💼 🏠 ⏱️)</label>
@@ -654,7 +677,7 @@ async function viewSettings() {
         <label>Home base (no layovers here)<input id="homeBase" maxlength="3" value="${esc(settings.homeBase || 'MEL')}"></label>
         <label>Flight events cover<select id="flightSpan"><option value="duty" ${settings.flightSpan !== 'flying' ? 'selected' : ''}>Report → sign off</option><option value="flying" ${settings.flightSpan === 'flying' ? 'selected' : ''}>First departure → last arrival</option></select></label>
       </div>
-      <button class="btn" id="saveCal">Save</button> <button class="btn" id="newCal">Create a new calendar</button>
+      <button class="btn" id="saveCal">Save</button> <button class="btn" id="newCal">Start fresh calendars</button>
     </section>
     <section class="panel">
       <h3>Google Drive</h3>
@@ -731,10 +754,10 @@ async function viewSettings() {
     if (!p.get('code') || !p.get('state')) { toast('That doesn\'t look like the text from the Google page.', 'error'); return; }
     try { const r = await G.exchange(p.get('code'), p.get('state')); toast(r.missing?.length ? `Connected, but missing: ${r.missing.join(', ')}` : 'Google connected.', r.missing?.length ? 'error' : 'ok', 8000); route(); } catch (e) { toast(e.message, 'error', 9000); }
   });
-  $('#saveCal').addEventListener('click', async () => { await saveSettings({ calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked, emojiTitles: $('#emoji').checked, homeBase: ($('#homeBase').value.trim() || 'MEL').toUpperCase(), flightSpan: $('#flightSpan').value }); toast('Saved.'); });
+  $('#saveCal').addEventListener('click', async () => { await saveSettings({ splitCalendars: $('#split').checked, calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked, emojiTitles: $('#emoji').checked, homeBase: ($('#homeBase').value.trim() || 'MEL').toUpperCase(), flightSpan: $('#flightSpan').value }); toast('Saved.'); });
   $('#newCal').addEventListener('click', async () => {
-    if (!(await confirmBox('Create a new, empty roster calendar? The old one stays in Google Calendar but the app will stop updating it.', 'Create'))) return;
-    await saveSettings({ calendarId: '', calendarName: $('#calName').value.trim() || 'VA Roster' });
+    if (!(await confirmBox('Start with new, empty roster calendars? The old ones stay in Google Calendar but the app stops updating them.', 'Start fresh'))) return;
+    await saveSettings({ calendarId: '', calendars: {}, calendarName: $('#calName').value.trim() || 'VA Roster' });
     toast('A new calendar will be created on the next sync.'); route();
   });
   $('#saveDrive').addEventListener('click', async () => {

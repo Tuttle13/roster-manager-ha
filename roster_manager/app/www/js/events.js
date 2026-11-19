@@ -62,7 +62,28 @@ export function eventDescription(d) {
 }
 
 // ---------------- Roster Buster-style events ----------------
-const ICON = { flight: '✈️', layover: '💼', home: '🏠', standby: '⏱️', training: '📚', leave: '🌴', other: '📋' };
+// Each kind of event goes in its own Google calendar, so apps like Pocket Informant can give each
+// one its own colour. Titles and icons stay Roster Buster-style.
+export const CATEGORIES = {
+  day: { name: 'VA Day Duty' },        // flight duties ending at home base (incl. last day of a trip)
+  trip: { name: 'VA Trips' },          // flight duties ending away from base, and their layovers
+  standby: { name: 'VA Standby' },
+  off: { name: 'VA Days Off' },        // days off, blank days, annual leave, sick
+  sim: { name: 'VA Sim' },             // simulator sessions and checks
+  ground: { name: 'VA Ground' },       // everything else
+};
+
+const SIM_RX = /\b(SIM|SIMULATOR|LOFT|LPC|OPC|FFS|CHECK|PROFICIENCY|IPC|EVAL)\b|^SIM/i;
+export function isSim(d) { return SIM_RX.test(d.code || '') || SIM_RX.test(d.notes || ''); }
+export function isSick(d) { return /^(SL|SICK)/i.test(d.code || '') || /\bsick\b/i.test(d.notes || ''); }
+
+export function categoryOf(d) {
+  if (d.type === 'DAY_OFF' || d.type === 'LEAVE' || (d.type === 'OTHER' && /^BLANK$/i.test(d.code || ''))) return 'off';
+  if (d.type === 'STANDBY' || d.type === 'RESERVE') return 'standby';
+  if (d.type === 'TRAINING' && isSim(d)) return 'sim';
+  return 'ground';
+}
+const ICON = { flight: '✈️', layover: '💼', home: '🏠', standby: '⏱️', training: '📚', leave: '🌴', sick: '🤒', other: '📋' };
 
 function t(opts, icon, text) { return opts.emoji === false ? text : `${ICON[icon]} ${text}`; }
 
@@ -70,7 +91,9 @@ export function rbTitle(d, opts = {}) {
   const code = (d.code || '').trim();
   switch (d.type) {
     case 'DAY_OFF': return t(opts, 'home', `Day off${code ? ` - ${code}` : ''}`);
-    case 'LEAVE': return t(opts, 'leave', /^AL/i.test(code) ? 'Annual Leave' : `Leave${code ? ` - ${code}` : ''}`);
+    case 'LEAVE':
+      if (isSick(d)) return t(opts, 'sick', 'Sick Leave');
+      return t(opts, 'leave', /^AL/i.test(code) || /annual/i.test(d.notes || '') ? 'Annual Leave' : `Leave${code ? ` - ${code}` : ''}`);
     case 'STANDBY': return t(opts, 'standby', 'Standby Duty');
     case 'RESERVE': return t(opts, 'standby', 'Reserve Duty');
     case 'TRAINING': return t(opts, 'training', `Training${code ? ` - ${code}` : ''}`);
@@ -108,10 +131,10 @@ function hoursText(ms) {
   return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')} hours`;
 }
 
-function finish(body, key, date) {
+function finish(body, key, date, cat) {
   const h = hash(body);
   body.extendedProperties = { private: { prmApp: APP_TAG, prmKey: key, prmDate: date, prmHash: h } };
-  return { key, date, body };
+  return { key, date, body, cat };
 }
 
 export function buildEvent(d, opts = {}) {
@@ -126,7 +149,7 @@ export function buildEvent(d, opts = {}) {
     body.transparency = 'opaque';
   }
   if (d.dep) body.location = d.dep;
-  return finish(body, d.key, d.date).body;
+  return finish(body, d.key, d.date, categoryOf(d)).body;
 }
 
 function flightGroupEvent(g, opts) {
@@ -163,7 +186,7 @@ export function buildEventList(duties, opts = {}) {
   const flightGroups = groupSectors(sorted).map(g => flightGroupEvent(g, opts));
   for (const fg of flightGroups) {
     const k = uniq(['F', fg.first.date, (fg.first.flightNumber || '').toUpperCase(), (fg.first.dep || '').toUpperCase()].join('|'));
-    out.push(finish(fg.body, k, fg.first.date));
+    out.push(finish(fg.body, k, fg.first.date, (fg.last.arr || '').toUpperCase() === home ? 'day' : 'trip'));
   }
   // Layovers: a flight duty ending away from base, followed by one departing from that port.
   for (let i = 0; i < flightGroups.length - 1; i++) {
@@ -178,13 +201,13 @@ export function buildEventList(duties, opts = {}) {
       description: `Layover in ${port}\nFrom: ${describeStamp(from)}\nTo: ${describeStamp(to)}${a.last.notes && /Hotel:/.test(a.last.notes) ? `\n${a.last.notes.split('\n').find(l => l.startsWith('Hotel:'))}` : ''}\n\nManaged by Roster Manager.`,
       start: gTime(from), end: gTime(to), transparency: 'opaque', location: port,
     };
-    out.push(finish(body, uniq(`L|${a.last.date}|${port}`), a.last.date));
+    out.push(finish(body, uniq(`L|${a.last.date}|${port}`), a.last.date, 'trip'));
   }
   for (const d of sorted) {
     if (DUTY_TYPES[d.type]?.sector) continue;
     const t2 = DUTY_TYPES[d.type] || DUTY_TYPES.OTHER;
     const k = uniq([t2.short, d.date, (d.code || '').toUpperCase(), ''].join('|'));
-    out.push({ key: k, date: d.date, body: buildEvent({ ...d, key: k }, opts) });
+    out.push({ key: k, date: d.date, body: buildEvent({ ...d, key: k }, opts), cat: categoryOf(d) });
   }
   return out;
 }
@@ -204,9 +227,11 @@ export function planSync(duties, existing, period, opts = {}) {
   for (const e of buildEventList(duties, opts)) {
     const ev = byKey.get(e.key);
     seen.add(e.key);
-    const item = { duty: { date: e.date }, body: e.body, key: e.key };
+    const calendarId = opts.calFor ? opts.calFor(e.cat) : undefined;
+    const item = { duty: { date: e.date }, body: e.body, key: e.key, cat: e.cat, calendarId };
+    const moved = ev && calendarId && ev.calendarId && ev.calendarId !== calendarId;
     if (!ev) create.push(item);
-    else if (ev.extendedProperties.private.prmHash !== e.body.extendedProperties.private.prmHash) update.push({ ...item, event: ev });
+    else if (moved || ev.extendedProperties.private.prmHash !== e.body.extendedProperties.private.prmHash) update.push({ ...item, event: ev, moved: !!moved });
     else unchanged.push({ ...item, event: ev });
   }
   for (const [key, ev] of byKey) {

@@ -152,12 +152,12 @@ function classify(duty, pairingDuty, flight, training, desc = '') {
   }
   if (/DEADHEAD|POSITION/.test(ds)) return 'OTHER';
   if (/DAY OFF|\bOFF\b/.test(ds)) return 'DAY_OFF';
-  if (/LEAVE/.test(ds)) return 'LEAVE';
+  if (/LEAVE|SICK/.test(ds)) return 'LEAVE';
   if (/RESERVE|STANDBY|STAND BY/.test(ds)) return 'STANDBY';
   if (/TRAIN|SIM|COURSE|CHECK|CRM|EMERGENCY/.test(ds)) return 'TRAINING';
   if (/BLANK/.test(ds) || d === 'BLANK') return 'OTHER';
   if (/^(DDO|DO|OFF|RDO|ADO|GDO|XDO|DFD|FDO|PDO)\b/.test(d)) return 'DAY_OFF';
-  if (/^(AL|ANL|SL|LSL|LVE|LEAVE|PL|CL|UL)\b/.test(d)) return 'LEAVE';
+  if (/^(AL|ANL|SL|LSL|LVE|LEAVE|PL|CL|UL|SICK)/.test(d)) return 'LEAVE';
   if (/^(SBY|SB|STBY|STB)/.test(d)) return 'STANDBY';
   if (/^(RES|RSV|RSRV)/.test(d)) return 'RESERVE';
   if (training || /^(RTP|SIM|CRM|EP|CBT|TRG|LOFT|LPC|OPC|CC|GS|SEP)/.test(d)) return 'TRAINING';
