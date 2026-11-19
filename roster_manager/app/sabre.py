@@ -297,6 +297,33 @@ async def _run(job: Job, settings, secrets):
                             except Exception:
                                 pass
                         await _click_submit(page)
+                    elif "Pick an account" in (await _text(page, "body"))[:600]:
+                        sig = "ms-picker"
+                        if counts.get(sig, 0) >= 2:
+                            await rec.snap(page, "microsoft-picker-again")
+                            raise RuntimeError("Microsoft keeps showing 'Pick an account'. Try Settings → Forget remembered sign-in, then capture again.")
+                        await rec.snap(page, "microsoft-pick-account")
+                        tile = await page.evaluate_handle("""(email) => {
+                          const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+                          const want = (email || '').toLowerCase();
+                          const tiles = [...document.querySelectorAll('[data-test-id], .table[role=button], [role=button], [role=listitem], .tile, div.table, small, div')].filter(vis);
+                          if (want) {
+                            const byId = [...document.querySelectorAll('[data-test-id]')].find(e => (e.getAttribute('data-test-id') || '').toLowerCase() === want && vis(e));
+                            if (byId) return byId;
+                            const hit = tiles.filter(e => (e.innerText || '').toLowerCase().includes(want));
+                            if (hit.length) { hit.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length); return hit[0].closest('[role=button], .table, [data-test-id], [tabindex]') || hit[0]; }
+                          }
+                          const other = [...document.querySelectorAll('[role=button], div, a')].filter(vis).find(e => /^\\s*use another account\\s*$/i.test(e.innerText || ''));
+                          return other || null;
+                        }""", email)
+                        el = tile.as_element()
+                        if not el:
+                            raise RuntimeError("Microsoft showed 'Pick an account' but the app couldn't find your account or 'Use another account'. Send the diagnostics file.")
+                        job.step("Microsoft: choosing your account")
+                        try:
+                            await el.click(timeout=5000)
+                        except Exception:
+                            await el.evaluate("e => e.click()")
                     else:
                         body = (await _text(page, "body"))[:300]
                         sig = "ms-other:" + body[:60]

@@ -1,3 +1,6 @@
+## 0.3.1
+- Handles Microsoft's "Pick an account" screen (chooses your work account, or "Use another account").
+
 ## 0.3.0
 - Calendar events now follow Roster Buster's layout: one ✈️ event per flight duty (e.g. "✈️ MEL BNE SYD OOL", report → sign off), 💼 Layover (h:mm hours) with the hotel name and phone, 🏠 Day off - DDO / 🏠 Blank day (all day), ⏱️ Standby Duty, 🌴 Annual Leave.
 - Duties are classified from Sabre's own Duty Codes table (handles PDO, ALVA, SBY05/07 and future codes); LO rows feed the layover instead of becoming events.

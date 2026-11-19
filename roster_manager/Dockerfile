@@ -13,4 +13,4 @@ WORKDIR /app
 
 CMD ["python3", "-u", "/app/server.py"]
 
-LABEL io.hass.type="addon" io.hass.version="0.3.0" io.hass.arch="amd64"
+LABEL io.hass.type="addon" io.hass.version="0.3.1" io.hass.arch="amd64"

@@ -6,7 +6,7 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.3.0 (Home Assistant)';
+export const APP_VERSION = '0.3.1 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
