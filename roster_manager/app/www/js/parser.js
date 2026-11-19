@@ -83,6 +83,34 @@ function plusDays(iso, n) {
 function stamp(date, time, port, basis) { return time ? { dt: `${date}T${time}`, basis, port } : null; }
 function shift(st, days) { return st ? { ...st, dt: `${plusDays(st.dt.slice(0, 10), days)}${st.dt.slice(10)}` } : st; }
 
+// Small lookup tables Sabre prints under the roster: header names -> { code: [cells...] }.
+function lookupTable(capture, firstHeader) {
+  const map = {};
+  for (const f of capture.frames || []) {
+    for (const t of f.tables || []) {
+      const hi = t.rows.findIndex(r => r.length >= 2 && key(r[0]?.t) === firstHeader && r.every(c => !/\d/.test(c.t || '')));
+      if (hi < 0) continue;
+      for (const r of t.rows.slice(hi + 1)) {
+        const code = norm(r[0]?.t);
+        if (code && !/nothing found/i.test(code)) map[code.toUpperCase()] = r.slice(1).map(c => norm(c.t));
+      }
+    }
+  }
+  if (Object.keys(map).length) return map;
+  // Fallback: read the section from the page text ("Duty Codes" … "SBY07<TAB>RESERVE AT HOME").
+  const heading = { hotel: 'Hotel Codes', duty: 'Duty Codes', training: 'Training Codes' }[firstHeader];
+  const text = (capture.frames || []).map(f => f.text || '').join('\n');
+  const i = heading ? text.indexOf(heading) : -1;
+  if (i >= 0) {
+    const section = text.slice(i + heading.length).split(/\n\s*\n\s*\n\s*[A-Z][a-z]+ Codes/)[0];
+    for (const line of section.split('\n')) {
+      const cells = line.split('\t').map(norm).filter(Boolean);
+      if (cells.length >= 2 && /^[$A-Z0-9_\-]{2,10}$/.test(cells[0]) && key(cells[0]) !== firstHeader) map[cells[0].toUpperCase()] = cells.slice(1);
+    }
+  }
+  return map;
+}
+
 function rosterTable(capture) {
   for (const f of capture.frames || []) {
     for (const t of f.tables || []) {
@@ -113,14 +141,22 @@ function rowsOf(table, headerIndex) {
   return out;
 }
 
-function classify(duty, pairingDuty, flight, training) {
+function classify(duty, pairingDuty, flight, training, desc = '') {
   const d = duty.toUpperCase().replace(/^\$\s*/, '');
   const pd = pairingDuty.toUpperCase();
+  const ds = desc.toUpperCase();
+  if (!flight && (d === 'LO' || /LAYOVER/.test(ds))) return 'LAYOVER';
   if (flight) {
     if (['DH', 'DHD', 'PAX', 'POS', 'DEADHEAD', 'DHF'].includes(d) || ['DH', 'DHD', 'PAX', 'POS'].includes(pd)) return 'POSITIONING';
     return 'FLIGHT';
   }
-  if (/^(DDO|DO|OFF|RDO|ADO|GDO|XDO|DFD|FDO)\b/.test(d)) return 'DAY_OFF';
+  if (/DEADHEAD|POSITION/.test(ds)) return 'OTHER';
+  if (/DAY OFF|\bOFF\b/.test(ds)) return 'DAY_OFF';
+  if (/LEAVE/.test(ds)) return 'LEAVE';
+  if (/RESERVE|STANDBY|STAND BY/.test(ds)) return 'STANDBY';
+  if (/TRAIN|SIM|COURSE|CHECK|CRM|EMERGENCY/.test(ds)) return 'TRAINING';
+  if (/BLANK/.test(ds) || d === 'BLANK') return 'OTHER';
+  if (/^(DDO|DO|OFF|RDO|ADO|GDO|XDO|DFD|FDO|PDO)\b/.test(d)) return 'DAY_OFF';
   if (/^(AL|ANL|SL|LSL|LVE|LEAVE|PL|CL|UL)\b/.test(d)) return 'LEAVE';
   if (/^(SBY|SB|STBY|STB)/.test(d)) return 'STANDBY';
   if (/^(RES|RSV|RSRV)/.test(d)) return 'RESERVE';
@@ -141,6 +177,9 @@ register({
     for (const w of capture.warnings || []) warnings.push(w);
     if (capture.notices) warnings.push(`Sabre Notice Board had notices: ${capture.notices.slice(0, 300)}`);
 
+    const hotels = lookupTable(capture, 'hotel');
+    const dutyCodes = lookupTable(capture, 'duty');
+    const hotelText = code => { const h = hotels[(code || '').toUpperCase()]; return h ? `${h[0]}${h[1] ? ` (${h[1]})` : ''}` : code; };
     const duties = [];
     let cur = null; let dayOff = 0; let lastUtc = null;
     for (const { row, raw } of rowsOf(found.table, found.headerIndex)) {
@@ -153,12 +192,20 @@ register({
       const ports = row.sector.toUpperCase().split(/[\s\-/]+/).filter(p => /^[A-Z]{3}$/.test(p));
       const [dep, arr] = [ports[0] || '', ports[1] || ''];
       const duty = row.duty;
-      const type = classify(duty, row.pairingduty, flight, row.training);
+      const desc = (dutyCodes[duty.toUpperCase().replace(/^\$\s*/, '')] || [])[0] || '';
+      const type = classify(duty, row.pairingduty, flight, row.training, desc);
+      if (type === 'LAYOVER') {
+        // Layover marker: the layover itself is worked out from the flights; keep the hotel.
+        const lastSector = [...duties].reverse().find(x => x.flightNumber);
+        if (row.hotel && lastSector && !/Hotel:/.test(lastSector.notes)) lastSector.notes = `${lastSector.notes ? `${lastSector.notes}\n` : ''}Hotel: ${hotelText(row.hotel)}`;
+        continue;
+      }
       const notes = [];
+      if (desc && !flight) notes.push(`${duty}: ${desc.charAt(0) + desc.slice(1).toLowerCase()}`);
       if (row.pairingduty) notes.push(`Position: ${row.pairingduty}`);
       if (row.flttime) notes.push(`Flight time: ${row.flttime}`);
       if (row.dutytime && row.dutytime !== '0') notes.push(`Duty time: ${row.dutytime}`);
-      if (row.hotel) notes.push(`Hotel: ${row.hotel}`);
+      if (row.hotel) notes.push(`Hotel: ${hotelText(row.hotel)}`);
       if (row.training) notes.push(`Training: ${row.training}`);
       if (row.remarks) notes.push(`Remarks: ${row.remarks}`);
       const base = { date: cur, code: flight ? '' : duty, flightNumber: flight, dep, arr, aircraft: (row['a/c'] || row.ac) && (row['a/c'] || row.ac) !== '-' ? (row['a/c'] || row.ac) : '', notes: notes.join('\n'), raw };

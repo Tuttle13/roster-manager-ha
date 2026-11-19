@@ -6,7 +6,7 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.2.0 (Home Assistant)';
+export const APP_VERSION = '0.3.0 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
@@ -14,6 +14,9 @@ const DEFAULT_SETTINGS = {
   sabreUserId: '21032',
   rosterUrl: '',
   cycleAnchor: '2026-12-21',
+  homeBase: 'MEL',
+  emojiTitles: true,
+  flightSpan: 'duty',
   publishDays: 10,
   googleClientId: '',
   calendarName: 'VA Roster',
@@ -509,8 +512,9 @@ async function preparePlan(c, btn) {
     const existing = await G.listAppEvents(cal.id, c.period);
     let duties = c.duties.filter(d => validateDuty(d, c.period).errors.length === 0);
     if (!settings.includeDaysOff) duties = duties.filter(d => d.type !== 'DAY_OFF');
+    if (!settings.includeDaysOff) duties = duties.filter(d => !(d.type === 'OTHER' && /^BLANK$/i.test(d.code || '')));
     const keyed = assignKeys(duties);
-    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy });
+    const plan = planSync(keyed, existing, c.period, { allDayBusy: settings.daysOffBusy, homeBase: settings.homeBase || 'MEL', emoji: settings.emojiTitles !== false, flightSpan: settings.flightSpan || 'duty' });
     currentPlan = { captureId: c.id, calendarId: cal.id, plan, keyed };
     renderPlan(c, currentPlan);
   } catch (e) {
@@ -643,8 +647,13 @@ async function viewSettings() {
       <h3>Google Calendar</h3>
       <label>Calendar name<input id="calName" value="${esc(settings.calendarName)}"></label>
       <p class="muted">${settings.calendarId ? `Using calendar <code>${esc(settings.calendarId)}</code>` : 'Created on first sync.'} The app can only see and change calendars it created itself.</p>
-      <label class="check"><input type="checkbox" id="incOff" ${settings.includeDaysOff ? 'checked' : ''}> Add days off to the calendar</label>
+      <label class="check"><input type="checkbox" id="incOff" ${settings.includeDaysOff ? 'checked' : ''}> Add days off and blank days to the calendar</label>
       <label class="check"><input type="checkbox" id="offBusy" ${settings.daysOffBusy ? 'checked' : ''}> Show days off/leave as busy</label>
+      <label class="check"><input type="checkbox" id="emoji" ${settings.emojiTitles !== false ? 'checked' : ''}> Icons in event titles (✈️ 💼 🏠 ⏱️)</label>
+      <div class="row">
+        <label>Home base (no layovers here)<input id="homeBase" maxlength="3" value="${esc(settings.homeBase || 'MEL')}"></label>
+        <label>Flight events cover<select id="flightSpan"><option value="duty" ${settings.flightSpan !== 'flying' ? 'selected' : ''}>Report → sign off</option><option value="flying" ${settings.flightSpan === 'flying' ? 'selected' : ''}>First departure → last arrival</option></select></label>
+      </div>
       <button class="btn" id="saveCal">Save</button> <button class="btn" id="newCal">Create a new calendar</button>
     </section>
     <section class="panel">
@@ -722,7 +731,7 @@ async function viewSettings() {
     if (!p.get('code') || !p.get('state')) { toast('That doesn\'t look like the text from the Google page.', 'error'); return; }
     try { const r = await G.exchange(p.get('code'), p.get('state')); toast(r.missing?.length ? `Connected, but missing: ${r.missing.join(', ')}` : 'Google connected.', r.missing?.length ? 'error' : 'ok', 8000); route(); } catch (e) { toast(e.message, 'error', 9000); }
   });
-  $('#saveCal').addEventListener('click', async () => { await saveSettings({ calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked }); toast('Saved.'); });
+  $('#saveCal').addEventListener('click', async () => { await saveSettings({ calendarName: $('#calName').value.trim() || 'VA Roster', includeDaysOff: $('#incOff').checked, daysOffBusy: $('#offBusy').checked, emojiTitles: $('#emoji').checked, homeBase: ($('#homeBase').value.trim() || 'MEL').toUpperCase(), flightSpan: $('#flightSpan').value }); toast('Saved.'); });
   $('#newCal').addEventListener('click', async () => {
     if (!(await confirmBox('Create a new, empty roster calendar? The old one stays in Google Calendar but the app will stop updating it.', 'Create'))) return;
     await saveSettings({ calendarId: '', calendarName: $('#calName').value.trim() || 'VA Roster' });

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { defaultPeriod, validatePeriod, periodEnd } from '../roster_manager/app/www/js/dates.js';
 import { zonedToUtc, utcToZoned, stampToUtc, tzFor } from '../roster_manager/app/www/js/tz.js';
 import { newDuty, assignKeys, validateDuty } from '../roster_manager/app/www/js/model.js';
-import { buildEvent, planSync, describeStamp } from '../roster_manager/app/www/js/events.js';
+import { planSync, describeStamp } from '../roster_manager/app/www/js/events.js';
 
 test('28-day default follows the last capture (spec example)', () => {
   assert.deepEqual(defaultPeriod({ start: '2026-12-01', end: '2026-12-28' }), { start: '2026-12-29', end: '2027-01-25' });
@@ -48,40 +48,54 @@ test('duty validation catches impossible times and unknown ports, never invents'
   assert.deepEqual(validateDuty(off).errors, []);
 });
 
-test('event body: local time zones, title, hidden key', () => {
-  const [d] = assignKeys([flight()]);
-  const ev = buildEvent(d);
-  assert.equal(ev.summary, 'VA923 BNE–SYD');
-  assert.deepEqual(ev.start, { dateTime: '2026-12-01T06:00:00', timeZone: 'Australia/Brisbane' });
-  assert.deepEqual(ev.end, { dateTime: '2026-12-01T08:30:00', timeZone: 'Australia/Sydney' });
-  assert.equal(ev.extendedProperties.private.prmKey, 'F|2026-12-01|VA923|BNE');
-  assert.match(ev.description, /Report: 05:00 BNE local \(19:00Z 30\/11\)/);
-  assert.equal(describeStamp({ dt: '2026-12-01T20:00', basis: 'utc', port: 'BNE' }), '06:00 BNE local 02/12 (20:00Z)');
-  const [off] = assignKeys([newDuty({ type: 'DAY_OFF', date: '2026-12-02' })]);
-  assert.deepEqual(buildEvent(off).end, { date: '2026-12-03' });
+const F2 = (n, date, dep, arr, s, e, extra = {}) => newDuty({ type: 'FLIGHT', date, flightNumber: n, dep, arr,
+  start: { dt: `${date}T${s}`, basis: 'local', port: dep }, end: { dt: `${date}T${e}`, basis: 'local', port: arr }, ...extra });
+
+test('RB-style events: one event per flight duty, layover, day off, blank, standby', async () => {
+  const { buildEventList } = await import('../roster_manager/app/www/js/events.js');
+  const L = (date, t, port) => ({ dt: `${date}T${t}`, basis: 'local', port });
+  const duties = [
+    F2('VA309', '2026-12-01', 'MEL', 'BNE', '07:12', '08:33', { report: L('2026-12-01', '06:10', 'MEL') }),
+    F2('VA510', '2026-12-01', 'BNE', 'SYD', '09:30', '11:00'),
+    F2('VA911', '2026-12-01', 'SYD', 'OOL', '12:00', '13:15', { release: L('2026-12-01', '13:45', 'OOL') }),
+    F2('VA912', '2026-12-02', 'OOL', 'MEL', '07:00', '09:30', { report: L('2026-12-02', '06:00', 'OOL'), release: L('2026-12-02', '10:00', 'MEL') }),
+    newDuty({ type: 'DAY_OFF', date: '2026-12-03', code: 'DDO' }),
+    newDuty({ type: 'OTHER', date: '2026-12-04', code: 'BLANK' }),
+    newDuty({ type: 'STANDBY', date: '2026-12-05', code: 'SBY03', dep: 'MEL', start: L('2026-12-05', '03:00', 'MEL'), end: L('2026-12-05', '05:20', 'MEL') }),
+  ];
+  const ev = buildEventList(duties);
+  const titles = ev.map(e => e.body.summary);
+  assert.deepEqual(titles, ['✈️ MEL BNE SYD OOL', '✈️ OOL MEL', '💼 Layover (16:15 hours)', '🏠 Day off - DDO', '🏠 Blank day', '⏱️ Standby Duty']);
+  const trip = ev[0].body;
+  assert.deepEqual(trip.start, { dateTime: '2026-12-01T06:10:00', timeZone: 'Australia/Melbourne' }, 'starts at report');
+  assert.deepEqual(trip.end, { dateTime: '2026-12-01T13:45:00', timeZone: 'Australia/Brisbane' }, 'ends at sign off (OOL is Queensland time)');
+  assert.match(trip.description, /VA510  BNE 09:30 → SYD 11:00/);
+  const lay = ev[2].body;
+  assert.equal(lay.location, 'OOL');
+  assert.deepEqual([lay.start.dateTime, lay.end.dateTime], ['2026-12-01T13:45:00', '2026-12-02T06:00:00']);
+  assert.deepEqual(ev[3].body.start, { date: '2026-12-03' });
+  assert.equal(new Set(ev.map(e => e.key)).size, ev.length, 'unique keys');
+  const flying = buildEventList(duties, { flightSpan: 'flying', emoji: false });
+  assert.equal(flying[0].body.summary, 'MEL BNE SYD OOL');
+  assert.equal(flying[0].body.start.dateTime, '2026-12-01T07:12:00');
+  assert.equal(buildEventList(duties.slice(0, 3), { homeBase: 'OOL' }).filter(e => /Layover/.test(e.body.summary)).length, 0);
 });
 
 test('sync plan: create, update on retime, unchanged, removal only inside period, duplicates', () => {
   const period = { start: '2026-12-01', end: '2026-12-28' };
   const asExisting = (body, id) => ({ id, summary: body.summary, extendedProperties: body.extendedProperties });
-  const first = assignKeys([flight(), flight({ flightNumber: 'VA924', dep: 'SYD', arr: 'BNE', start: { dt: '2026-12-01T10:00', basis: 'local', port: 'SYD' }, end: { dt: '2026-12-01T11:40', basis: 'local', port: 'BNE' } })]);
-  const p1 = planSync(first, [], period);
+  const r1 = [F2('VA923', '2026-12-01', 'BNE', 'SYD', '06:00', '08:30'), newDuty({ type: 'DAY_OFF', date: '2026-12-02', code: 'OFF' })];
+  const p1 = planSync(r1, [], period);
   assert.equal(p1.create.length, 2);
-
   const existing = p1.create.map((x, i) => asExisting(x.body, `e${i}`));
-  // same roster again -> nothing to do (no duplicates)
-  const p2 = planSync(assignKeys(first), existing, period);
-  assert.equal(p2.create.length, 0); assert.equal(p2.unchanged.length, 2); assert.equal(p2.remove.length, 0);
-
-  // VA923 retimed, VA924 removed from roster
-  const second = assignKeys([flight({ start: { dt: '2026-12-01T07:00', basis: 'local', port: 'BNE' }, end: { dt: '2026-12-01T09:30', basis: 'local', port: 'SYD' } })]);
-  const outsideOld = asExisting({ ...p1.create[0].body, extendedProperties: { private: { ...p1.create[0].body.extendedProperties.private, prmKey: 'F|2026-11-20|VA1|BNE', prmDate: '2026-11-20' } } }, 'old');
-  const dup = { ...existing[0], id: 'dup' };
-  const p3 = planSync(second, [...existing, outsideOld, dup], period);
+  const p2 = planSync(r1, existing, period);
+  assert.deepEqual([p2.create.length, p2.unchanged.length, p2.remove.length], [0, 2, 0]);
+  // flight retimed, day off removed, an old event outside the period, a duplicate
+  const r2 = [F2('VA923', '2026-12-01', 'BNE', 'SYD', '07:00', '09:30')];
+  const outside = asExisting({ summary: 'old', extendedProperties: { private: { prmApp: 'roster-manager', prmKey: 'F|2026-11-20|VA1|BNE', prmDate: '2026-11-20', prmHash: 'x' } } }, 'old');
+  const p3 = planSync(r2, [...existing, outside, { ...existing[0], id: 'dup' }], period);
   assert.equal(p3.update.length, 1); assert.equal(p3.update[0].event.id, 'e0');
-  assert.equal(p3.create.length, 0);
-  const removed = p3.remove.map(r => r.event.id).sort();
-  assert.deepEqual(removed, ['dup', 'e1'], 'removes VA924 + duplicate, leaves the event outside the period');
+  assert.deepEqual(p3.remove.map(r => r.event.id).sort(), ['dup', 'e1']);
   assert.ok(p3.remove.find(r => r.event.id === 'dup').duplicate);
 });
 

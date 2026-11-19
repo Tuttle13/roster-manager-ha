@@ -1,7 +1,7 @@
 // Pure functions: duty -> Google Calendar event body, and the diff ("sync plan") between the
 // reviewed roster and events already in the calendar. No network calls here, so it's unit-testable.
 
-import { DUTY_TYPES, isAllDay, hash } from './model.js';
+import { DUTY_TYPES, isAllDay, hash, sortDuties } from './model.js';
 import { addDays } from './dates.js';
 import { tzFor, stampToUtc, utcToZoned } from './tz.js';
 
@@ -61,25 +61,136 @@ export function eventDescription(d) {
   return lines.join('\n');
 }
 
-export function buildEvent(d, { allDayBusy = false } = {}) {
-  const body = { summary: eventTitle(d), description: eventDescription(d) };
+// ---------------- Roster Buster-style events ----------------
+const ICON = { flight: '✈️', layover: '💼', home: '🏠', standby: '⏱️', training: '📚', leave: '🌴', other: '📋' };
+
+function t(opts, icon, text) { return opts.emoji === false ? text : `${ICON[icon]} ${text}`; }
+
+export function rbTitle(d, opts = {}) {
+  const code = (d.code || '').trim();
+  switch (d.type) {
+    case 'DAY_OFF': return t(opts, 'home', `Day off${code ? ` - ${code}` : ''}`);
+    case 'LEAVE': return t(opts, 'leave', /^AL/i.test(code) ? 'Annual Leave' : `Leave${code ? ` - ${code}` : ''}`);
+    case 'STANDBY': return t(opts, 'standby', 'Standby Duty');
+    case 'RESERVE': return t(opts, 'standby', 'Reserve Duty');
+    case 'TRAINING': return t(opts, 'training', `Training${code ? ` - ${code}` : ''}`);
+    case 'GROUND': return t(opts, 'other', `Ground duty${code ? ` - ${code}` : ''}`);
+    default:
+      if (/^BLANK$/i.test(code)) return t(opts, 'home', 'Blank day');
+      return t(opts, 'other', code || 'Duty');
+  }
+}
+
+function isHomeLike(d) { return d.type === 'DAY_OFF' || (d.type === 'OTHER' && /^BLANK$/i.test(d.code || '')); }
+
+function sectorLine(d) {
+  const hm = s => (s && s.dt ? s.dt.slice(11, 16) : '--:--');
+  const pax = d.type === 'POSITIONING' ? ' (PAX)' : '';
+  return `${d.flightNumber || '—'}${pax}  ${d.dep} ${hm(d.start)} → ${d.arr} ${hm(d.end)}${d.aircraft ? `  ${d.aircraft}` : ''}`;
+}
+
+// Sectors that form one duty: same roster day, ports chain on, and no sign-off/report in between.
+export function groupSectors(sorted) {
+  const groups = [];
+  let g = null;
+  for (const d of sorted) {
+    const sector = DUTY_TYPES[d.type]?.sector;
+    if (!sector) { g = null; continue; }
+    const prev = g && g[g.length - 1];
+    const startsNew = !g || prev.date !== d.date || (prev.release && prev.release.dt) || (d.report && d.report.dt) || (prev.arr && d.dep && prev.arr !== d.dep);
+    if (startsNew) { g = [d]; groups.push(g); } else g.push(d);
+  }
+  return groups;
+}
+
+function hoursText(ms) {
+  const m = Math.round(ms / 60000);
+  return `${Math.floor(m / 60)}:${String(m % 60).padStart(2, '0')} hours`;
+}
+
+function finish(body, key, date) {
+  const h = hash(body);
+  body.extendedProperties = { private: { prmApp: APP_TAG, prmKey: key, prmDate: date, prmHash: h } };
+  return { key, date, body };
+}
+
+export function buildEvent(d, opts = {}) {
+  const body = { summary: rbTitle(d, opts), description: eventDescription(d) };
   if (isAllDay(d)) {
     body.start = { date: d.date };
     body.end = { date: addDays(d.date, 1) };
-    body.transparency = ['DAY_OFF', 'LEAVE'].includes(d.type) && !allDayBusy ? 'transparent' : 'opaque';
+    body.transparency = (['DAY_OFF', 'LEAVE'].includes(d.type) || isHomeLike(d)) && !opts.allDayBusy ? 'transparent' : 'opaque';
   } else {
     body.start = gTime(d.start);
     body.end = gTime(d.end);
     body.transparency = 'opaque';
   }
-  if (d.dep) body.location = DUTY_TYPES[d.type]?.sector ? `${d.dep} Airport` : d.dep;
-  const h = hash(body);
-  body.extendedProperties = { private: { prmApp: APP_TAG, prmKey: d.key, prmDate: d.date, prmHash: h } };
-  return body;
+  if (d.dep) body.location = d.dep;
+  return finish(body, d.key, d.date).body;
 }
 
-// duties: keyed duties (assignKeys) to sync. existing: events from the app calendar.
-// period: { start, end } — only existing events dated inside it are candidates for removal.
+function flightGroupEvent(g, opts) {
+  const first = g[0]; const last = g[g.length - 1];
+  const ports = [first.dep, ...g.map(x => x.arr)].filter(Boolean);
+  const allPax = g.every(x => x.type === 'POSITIONING');
+  const report = g.find(x => x.report?.dt)?.report || null;
+  const release = [...g].reverse().find(x => x.release?.dt)?.release || null;
+  const span = opts.flightSpan === 'flying' ? 'flying' : 'duty';
+  const start = span === 'duty' && report ? report : first.start;
+  const end = span === 'duty' && release ? release : last.end;
+  const lines = [];
+  if (report) lines.push(`Report: ${describeStamp(report)}`);
+  lines.push(...g.map(sectorLine));
+  if (release) lines.push(`Sign off: ${describeStamp(release)}`);
+  const extras = [...new Set(g.flatMap(x => (x.notes || '').split('\n')).filter(Boolean))];
+  if (extras.length) lines.push('', ...extras);
+  lines.push('', 'Times are local to each airport.', 'Managed by Roster Manager. Edits here are overwritten on the next sync.');
+  const body = {
+    summary: t(opts, 'flight', `${allPax ? 'PAX ' : ''}${ports.join(' ')}`),
+    description: lines.join('\n'),
+    start: gTime(start), end: gTime(end), transparency: 'opaque', location: first.dep,
+  };
+  return { body, first, last, start, end };
+}
+
+// All calendar events for a roster: grouped flight duties, layovers, and the other duties.
+export function buildEventList(duties, opts = {}) {
+  const home = (opts.homeBase || 'MEL').toUpperCase();
+  const sorted = sortDuties(duties);
+  const out = []; const used = new Map();
+  const uniq = k => { const n = (used.get(k) || 0) + 1; used.set(k, n); return n === 1 ? k : `${k}#${n}`; };
+
+  const flightGroups = groupSectors(sorted).map(g => flightGroupEvent(g, opts));
+  for (const fg of flightGroups) {
+    const k = uniq(['F', fg.first.date, (fg.first.flightNumber || '').toUpperCase(), (fg.first.dep || '').toUpperCase()].join('|'));
+    out.push(finish(fg.body, k, fg.first.date));
+  }
+  // Layovers: a flight duty ending away from base, followed by one departing from that port.
+  for (let i = 0; i < flightGroups.length - 1; i++) {
+    const a = flightGroups[i]; const b = flightGroups[i + 1];
+    const port = (a.last.arr || '').toUpperCase();
+    if (!port || port === home || (b.first.dep || '').toUpperCase() !== port) continue;
+    const from = a.end; const to = b.start;
+    const fu = stampToUtc(from); const tu = stampToUtc(to);
+    if (fu == null || tu == null || tu <= fu) continue;
+    const body = {
+      summary: t(opts, 'layover', `Layover (${hoursText(tu - fu)})`),
+      description: `Layover in ${port}\nFrom: ${describeStamp(from)}\nTo: ${describeStamp(to)}${a.last.notes && /Hotel:/.test(a.last.notes) ? `\n${a.last.notes.split('\n').find(l => l.startsWith('Hotel:'))}` : ''}\n\nManaged by Roster Manager.`,
+      start: gTime(from), end: gTime(to), transparency: 'opaque', location: port,
+    };
+    out.push(finish(body, uniq(`L|${a.last.date}|${port}`), a.last.date));
+  }
+  for (const d of sorted) {
+    if (DUTY_TYPES[d.type]?.sector) continue;
+    const t2 = DUTY_TYPES[d.type] || DUTY_TYPES.OTHER;
+    const k = uniq([t2.short, d.date, (d.code || '').toUpperCase(), ''].join('|'));
+    out.push({ key: k, date: d.date, body: buildEvent({ ...d, key: k }, opts) });
+  }
+  return out;
+}
+
+// duties: the reviewed roster. existing: events from the app calendar.
+// period: { start, end }. Only existing events dated inside it are candidates for removal.
 export function planSync(duties, existing, period, opts = {}) {
   const byKey = new Map();
   const duplicates = [];
@@ -90,13 +201,13 @@ export function planSync(duties, existing, period, opts = {}) {
   }
   const create = []; const update = []; const unchanged = []; const remove = [];
   const seen = new Set();
-  for (const d of duties) {
-    const body = buildEvent(d, opts);
-    const ev = byKey.get(d.key);
-    seen.add(d.key);
-    if (!ev) create.push({ duty: d, body });
-    else if (ev.extendedProperties.private.prmHash !== body.extendedProperties.private.prmHash) update.push({ duty: d, body, event: ev });
-    else unchanged.push({ duty: d, event: ev });
+  for (const e of buildEventList(duties, opts)) {
+    const ev = byKey.get(e.key);
+    seen.add(e.key);
+    const item = { duty: { date: e.date }, body: e.body, key: e.key };
+    if (!ev) create.push(item);
+    else if (ev.extendedProperties.private.prmHash !== e.body.extendedProperties.private.prmHash) update.push({ ...item, event: ev });
+    else unchanged.push({ ...item, event: ev });
   }
   for (const [key, ev] of byKey) {
     if (seen.has(key)) continue;

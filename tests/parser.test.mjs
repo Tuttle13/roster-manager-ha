@@ -4,15 +4,15 @@ import assert from 'node:assert/strict';
 globalThis.crypto ??= (await import('node:crypto')).webcrypto;
 const { parseCapture } = await import('../roster_manager/app/www/js/parser.js');
 const { validateDuty, assignKeys } = await import('../roster_manager/app/www/js/model.js');
-const { buildEvent } = await import('../roster_manager/app/www/js/events.js');
+const { buildEventList } = await import('../roster_manager/app/www/js/events.js');
 
 const H = ['Start Date','Day','Flight Number','Sector','A/C','Duty','Pairing Duty','Rpt','STD','STA','Sign Off','Flt Time','Duty Time','Hotel','Training','Remarks'];
 const R = (...c) => c.map(t => ({ t }));
 const rows = [
   R('Page 1 of 1'),
   H.map(t => ({ t, h: 1 })),
-  R('26OCT26','MON','','MEL','','$ DDO','','','','','','','0','','','LMOM RE DRAFT'),
-  R('27OCT26','TUE','','MEL','-','RTP6-26_A','','1320','1420','1820','1910','','05:50','','RTP6-Day1','<RTP6-Day1 - I-G.BATOR/G.BATOR/S.THOMPSON>'),
+  R('26OCT26','MON','','MEL','','$ DDO','','','','','','','0','','','TEST REMARK'),
+  R('27OCT26','TUE','','MEL','-','RTP6-26_A','','1320','1420','1820','1910','','05:50','','RTP6-Day1','<RTP6-Day1>'),
   R('29OCT26','THU','','MEL','','BLANK','','','','','','','0','','',''),
   R('30OCT26','FRI','','MEL','','SBY03','','0300','0300','0520','','02:20','07:05','','',''),
   R('','','VA 0253','MEL CBR','7M8','FLY','FO','','0619','0728','','01:09','','','',''),
@@ -47,8 +47,14 @@ test('reads the Sabre Roster Report', () => {
   assert.equal(v1234.end.dt, '2026-11-04T01:30', 'arrives after midnight');
   assert.equal(v1234.release.dt, '2026-11-04T02:15');
   for (const x of d) assert.deepEqual(validateDuty(x, { start: '2026-10-26', end: '2026-11-22' }).errors, [], `${x.flightNumber || x.code}: ${validateDuty(x).errors}`);
-  const ev = buildEvent(assignKeys([v253])[0]);
-  assert.equal(ev.summary, 'VA253 MEL–CBR');
-  assert.deepEqual(ev.start, { dateTime: '2026-10-30T06:19:00', timeZone: 'Australia/Melbourne' });
-  assert.match(ev.description, /Position: FO/);
+  const evs = buildEventList(d).map(e => e.body);
+  const callout = evs.find(e => e.summary === '✈️ MEL CBR MEL');
+  assert.ok(callout, 'standby callout sectors grouped: ' + evs.map(e => e.summary).join(' | '));
+  assert.deepEqual(callout.start, { dateTime: '2026-10-30T06:19:00', timeZone: 'Australia/Melbourne' }, 'no report on callout: starts at first departure');
+  assert.deepEqual(callout.end, { dateTime: '2026-10-30T10:05:00', timeZone: 'Australia/Melbourne' }, 'ends at sign off');
+  assert.match(callout.description, /Position: FO/);
+  assert.ok(evs.some(e => e.summary === '⏱️ Standby Duty'));
+  assert.ok(evs.some(e => e.summary === '🏠 Blank day'));
+  assert.ok(evs.some(e => e.summary === '🏠 Day off - $ DDO'));
+  assert.ok(evs.some(e => e.summary === '✈️ MEL BNE PER'), 'VA309 + VA1234 one duty');
 });
