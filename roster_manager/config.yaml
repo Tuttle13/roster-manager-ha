@@ -1,0 +1,25 @@
+name: Roster Manager
+version: "0.1.0"
+slug: roster_manager
+description: Capture your Virgin Australia (Sabre) roster on demand, review it, sync it to Google Calendar and back it up to Google Drive.
+url: https://github.com/Tuttle13/roster-manager-ha
+arch:
+  - amd64
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:airplane-clock
+panel_title: Roster
+panel_admin: false
+# Keep the remembered Microsoft session, encrypted passwords/Google token and
+# diagnostics out of Home Assistant backups.
+backup_exclude:
+  - "browser"
+  - "browser/*"
+  - "debug"
+  - "debug/*"
+  - "secret.key"
+  - "secrets.enc"
+options: {}
+schema: {}
