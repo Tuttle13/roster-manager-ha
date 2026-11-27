@@ -13,7 +13,7 @@ import scheduler
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -24,7 +24,7 @@ DEFAULT_SETTINGS = {
     "sabreUserId": "21032",
     "browserTz": "Australia/Sydney",
     "autoEnabled": False,
-    "autoAnchorPublish": "2026-12-11",
+    "autoAnchorPublish": "20.7.02-11",
     "autoOffsetStart": 10,
     "autoStartHour": 15,
     "retryMinutes": 20,
@@ -167,6 +167,9 @@ async def creds_check_totp(r):
 async def creds_set(r):
     body = await r.json()
     allowed = {k: body[k] for k in ("msPassword", "sabrePassword", "googleClientSecret", "totpSecret") if k in body}
+    if "totpSecret" in allowed and allowed["totpSecret"]:
+        import sabre
+        allowed["totpSecret"] = sabre._extract_secret(allowed["totpSecret"])
     store.secrets_set(**allowed)
     labels = {"msPassword": "Microsoft password", "sabrePassword": "Sabre password", "googleClientSecret": "Google client secret", "totpSecret": "authenticator key"}
     store.log_add({"kind": "settings", "ok": True, "message": "Updated saved " + ", ".join(labels.get(k, k) for k in allowed)})

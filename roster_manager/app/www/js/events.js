@@ -108,7 +108,8 @@ function isHomeLike(d) { return d.type === 'DAY_OFF' || (d.type === 'OTHER' && /
 function sectorLine(d) {
   const hm = s => (s && s.dt ? s.dt.slice(11, 16) : '--:--');
   const pax = d.type === 'POSITIONING' ? ' (PAX)' : '';
-  return `${d.flightNumber || '—'}${pax}  ${d.dep} ${hm(d.start)} → ${d.arr} ${hm(d.end)}${d.aircraft ? `  ${d.aircraft}` : ''}`;
+  const ft = d.flightTime ? `  FT ${d.flightTime}` : '';
+  return `${d.flightNumber || '—'}${pax}  ${d.dep} ${hm(d.start)} → ${d.arr} ${hm(d.end)}${d.aircraft ? `  ${d.aircraft}` : ''}${ft}`;
 }
 
 // Sectors that form one duty: same roster day, ports chain on, and no sign-off/report in between.

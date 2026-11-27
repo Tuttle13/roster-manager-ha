@@ -206,12 +206,11 @@ register({
       const notes = [];
       if (desc && !flight) notes.push(`${duty}: ${desc.charAt(0) + desc.slice(1).toLowerCase()}`);
       if (row.pairingduty) notes.push(`Position: ${row.pairingduty}`);
-      if (row.flttime) notes.push(`Flight time: ${row.flttime}`);
       if (row.dutytime && row.dutytime !== '0') notes.push(`Duty time: ${row.dutytime}`);
       if (row.hotel) notes.push(`Hotel: ${hotelText(row.hotel)}`);
       if (row.training) notes.push(`Training: ${row.training}`);
       if (row.remarks) notes.push(`Remarks: ${row.remarks}`);
-      const base = { date: cur, code: flight ? '' : duty, flightNumber: flight, dep, arr, aircraft: (row['a/c'] || row.ac) && (row['a/c'] || row.ac) !== '-' ? (row['a/c'] || row.ac) : '', notes: notes.join('\n'), raw };
+      const base = { date: cur, code: flight ? '' : duty, flightNumber: flight, dep, arr, flightTime: flight ? (row.flttime || '') : '', aircraft: (row['a/c'] || row.ac) && (row['a/c'] || row.ac) !== '-' ? (row['a/c'] || row.ac) : '', notes: notes.join('\n'), raw };
 
       const std = hhmm(row.std); const sta = hhmm(row.sta); const rpt = hhmm(row.rpt); const off = hhmm(row.signoff);
       if (flight) {

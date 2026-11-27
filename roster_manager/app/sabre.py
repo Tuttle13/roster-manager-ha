@@ -43,10 +43,20 @@ import struct
 import base64
 
 
+def _extract_secret(raw):
+    """Accept a base32 secret, or a full otpauth://...?secret=XXXX URL (copy-pasted whole)."""
+    raw = (raw or "").strip()
+    m = re.search(r"[?&]secret=([^&\s]+)", raw, re.I)
+    if m:
+        raw = m.group(1)
+    return re.sub(r"\s+", "", raw).upper()
+
+
 def totp_code(secret, at=None, digits=6, period=30):
-    """Standard RFC 6238 TOTP (the same 6-digit codes an authenticator app shows)."""
-    clean = re.sub(r"\s+", "", secret or "").upper()
-    if not clean:
+    """Standard RFC 6238 TOTP (the same 6-digit codes an authenticator app shows).
+    Accepts a raw secret or an otpauth:// URL."""
+    clean = _extract_secret(secret)
+    if not clean or any(c in clean for c in "0189"):  # base32 has no 0/1/8/9
         return None
     pad = "=" * ((8 - len(clean) % 8) % 8)
     try:

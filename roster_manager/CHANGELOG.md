@@ -1,3 +1,9 @@
+## 0.7.0
+- Flying event details are now cleanly machine-parseable: each sector line ends with its planned flight time, e.g. "VA313  MEL 08:10 -> BNE 09:20  73H  FT 02:10". The old combined flight-time block is gone. Same layout for day duties and trips. (For the logbook app to autofill route + flight time mid-flight.)
+
+## 0.6.1
+- Authenticator key field now accepts the whole otpauth:// setup URL (or the bare key); a numeric code is correctly rejected.
+
 ## 0.6.0
 - Automatic Friday capture: on each publication day (every 4 weeks) the app fetches the new 28-day roster on its own, retrying every 20 minutes if Sabre is crashing, then adds it to Google Calendar and backs it up — fully unattended. It only adds/updates, never deletes. Overnight pause and a give-up window are configurable.
 - Optional phone notifications via a Home Assistant notify service (roster added / needs attention).

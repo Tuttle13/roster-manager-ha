@@ -33,7 +33,7 @@ export function newDuty(partial = {}) {
   return {
     id: crypto.randomUUID(), type: 'FLIGHT', date: '', code: '', flightNumber: '', dep: '', arr: '',
     start: null, end: null, report: null, release: null, actualStart: null, actualEnd: null,
-    aircraft: '', notes: '', annotations: [], source: 'manual', edited: false, raw: '',
+    aircraft: '', flightTime: '', notes: '', annotations: [], source: 'manual', edited: false, raw: '',
     ...partial,
   };
 }

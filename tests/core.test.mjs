@@ -56,7 +56,7 @@ test('RB-style events: one event per flight duty, layover, day off, blank, stand
   const L = (date, t, port) => ({ dt: `${date}T${t}`, basis: 'local', port });
   const duties = [
     F2('VA309', '2026-12-01', 'MEL', 'BNE', '07:12', '08:33', { report: L('2026-12-01', '06:10', 'MEL') }),
-    F2('VA510', '2026-12-01', 'BNE', 'SYD', '09:30', '11:00'),
+    F2('VA510', '2026-12-01', 'BNE', 'SYD', '09:30', '11:00', { flightTime: '01:35' }),
     F2('VA911', '2026-12-01', 'SYD', 'OOL', '12:00', '13:15', { release: L('2026-12-01', '13:45', 'OOL') }),
     F2('VA912', '2026-12-02', 'OOL', 'MEL', '07:00', '09:30', { report: L('2026-12-02', '06:00', 'OOL'), release: L('2026-12-02', '10:00', 'MEL') }),
     newDuty({ type: 'DAY_OFF', date: '2026-12-03', code: 'DDO' }),
@@ -69,7 +69,8 @@ test('RB-style events: one event per flight duty, layover, day off, blank, stand
   const trip = ev[0].body;
   assert.deepEqual(trip.start, { dateTime: '2026-12-01T06:10:00', timeZone: 'Australia/Melbourne' }, 'starts at report');
   assert.deepEqual(trip.end, { dateTime: '2026-12-01T13:45:00', timeZone: 'Australia/Brisbane' }, 'ends at sign off (OOL is Queensland time)');
-  assert.match(trip.description, /VA510  BNE 09:30 → SYD 11:00/);
+  assert.match(trip.description, /VA510  BNE 09:30 → SYD 11:00  FT 01:35/);
+  assert.doesNotMatch(trip.description, /\nFlight time:/); // per-sector FT only, no jumbled block
   const lay = ev[2].body;
   assert.equal(lay.location, 'OOL');
   assert.deepEqual([lay.start.dateTime, lay.end.dateTime], ['2026-12-01T14:15:00', '2026-12-01T17:15:00'], 'short block: 30 min after sign-off, 3 h');
