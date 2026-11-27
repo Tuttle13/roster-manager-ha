@@ -1,3 +1,6 @@
+## 0.7.2
+- Sends your upcoming rostered flights (flight number, ports, planned times, aircraft, planned flight time) to the Pilot Logbook on this Home Assistant, so a new logbook entry made during a rostered flight is pre-filled with its route and flight time, even offline. Runs by itself after each capture and every few hours; does nothing if Pilot Logbook isn't installed.
+
 ## 0.7.1
 - Authenticator key: a dedicated "Save key" button and a Saved/Not set status, so the key is actually stored (Check key alone never saved it).
 - Clearer capture steps when Microsoft asks for MFA: says whether it switched to a code, couldn't switch, or has no key saved.
