@@ -25,6 +25,7 @@ SECTOR_TYPES = {"FLIGHT", "POSITIONING"}
 PAST_DAYS, FUTURE_DAYS = 3, 21
 CHECK_EVERY = 60            # seconds between looks for changed captures
 RESEND_EVERY = 6 * 3600     # resend anyway, in case Home Assistant restarted
+RETRY_EVERY = 5 * 60        # after a failed send (e.g. Home Assistant was restarting), try again this soon
 
 _status = {"lastSent": None, "lastResult": None, "sectors": 0}
 
@@ -109,7 +110,11 @@ async def push():
                 _status.update(lastSent=store.now_iso(), sectors=len(sectors),
                                lastResult="ok" if r.status == 200 else ("logbook not installed" if r.status == 404 else f"HTTP {r.status}"))
     except Exception as err:  # noqa: BLE001 - never disturb the roster app
-        _status.update(lastSent=store.now_iso(), lastResult=f"error: {err}")
+        _status.update(lastSent=store.now_iso(), lastResult=f"error: {err or type(err).__name__}")
+    ok = _status["lastResult"] == "ok"
+    print(f"Pilot Logbook: sent {len(sectors)} rostered flights" if ok else
+          f"Pilot Logbook: could not send rostered flights ({_status['lastResult']}), trying again in {RETRY_EVERY // 60} min", flush=True)
+    return ok
 
 
 def _fingerprint():
@@ -122,16 +127,17 @@ def _fingerprint():
 
 async def _loop():
     await asyncio.sleep(45)          # let Home Assistant finish starting
-    seen, last = None, 0.0
+    seen, last, ok = None, 0.0, True
     loop = asyncio.get_running_loop()
     while True:
         try:
             fp = _fingerprint()
-            if fp != seen or loop.time() - last >= RESEND_EVERY:
-                await push()
+            wait = RESEND_EVERY if ok else RETRY_EVERY
+            if fp != seen or loop.time() - last >= wait:
+                ok = await push() is not False
                 seen, last = fp, loop.time()
         except Exception:  # noqa: BLE001
-            pass
+            ok, last = False, loop.time()
         await asyncio.sleep(CHECK_EVERY)
 
 

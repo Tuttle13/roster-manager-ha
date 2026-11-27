@@ -1,3 +1,6 @@
+## 0.7.3
+- Pilot Logbook feed: if sending the rostered flights fails (for example while Home Assistant is restarting), it tries again every 5 minutes instead of waiting 6 hours. Each send is noted in the app's log.
+
 ## 0.7.2
 - Sends your upcoming rostered flights (flight number, ports, planned times, aircraft, planned flight time) to the Pilot Logbook on this Home Assistant, so a new logbook entry made during a rostered flight is pre-filled with its route and flight time, even offline. Runs by itself after each capture and every few hours; does nothing if Pilot Logbook isn't installed.
 

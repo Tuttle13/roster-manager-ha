@@ -14,7 +14,7 @@ import scheduler
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
