@@ -13,7 +13,7 @@ import scheduler
 import store
 
 WWW = Path(__file__).parent / "www"
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 # Home Assistant's ingress proxy. Nothing else may talk to this app.
 ALLOWED_PEERS = {"172.30.32.2"} | ({"127.0.0.1", "::1"} if os.environ.get("DEV") else set())
 
@@ -24,7 +24,7 @@ DEFAULT_SETTINGS = {
     "sabreUserId": "21032",
     "browserTz": "Australia/Sydney",
     "autoEnabled": False,
-    "autoAnchorPublish": "20.7.02-11",
+    "autoAnchorPublish": "20.7.12-11",
     "autoOffsetStart": 10,
     "autoStartHour": 15,
     "retryMinutes": 20,

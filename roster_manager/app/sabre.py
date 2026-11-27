@@ -331,10 +331,14 @@ async def _run(job: Job, settings, secrets):
                             await _click_submit(page)
                         elif await _visible(page, "#idRichContext_DisplaySign, .displaySign"):
                             sig = "ms-number"
-                            if totp and await _switch_to_code(page):
-                                job.step("Microsoft: switching to a verification code")
-                                await asyncio.sleep(1)
-                                continue
+                            if totp:
+                                if await _switch_to_code(page):
+                                    job.step("Microsoft: switching to a verification code")
+                                    await asyncio.sleep(1)
+                                    continue
+                                job.step("Microsoft: couldn't switch to a verification code on this page")
+                            else:
+                                job.step("No authenticator key saved — can't auto-enter a code (Settings → Work logins)")
                             number = await _text(page, "#idRichContext_DisplaySign, .displaySign")
                             await rec.snap(page, "microsoft-authenticator-number")
                             job.prompt = {"kind": "number", "value": number, "text": "Open Microsoft Authenticator on your phone and enter this number."}

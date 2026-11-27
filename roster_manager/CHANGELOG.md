@@ -1,3 +1,8 @@
+## 0.7.1
+- Authenticator key: a dedicated "Save key" button and a Saved/Not set status, so the key is actually stored (Check key alone never saved it).
+- Clearer capture steps when Microsoft asks for MFA: says whether it switched to a code, couldn't switch, or has no key saved.
+- Tip: set your Microsoft default sign-in method to "Authenticator app or hardware token - code" so it shows a code box directly.
+
 ## 0.7.0
 - Flying event details are now cleanly machine-parseable: each sector line ends with its planned flight time, e.g. "VA313  MEL 08:10 -> BNE 09:20  73H  FT 02:10". The old combined flight-time block is gone. Same layout for day duties and trips. (For the logbook app to autofill route + flight time mid-flight.)
 

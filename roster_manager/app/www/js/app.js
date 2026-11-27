@@ -6,14 +6,14 @@ import { readClipboardPayload, parseCapture, captureText } from './parser.js';
 import { planSync, eventTitle, CATEGORIES } from './events.js';
 import * as G from './google.js';
 
-export const APP_VERSION = '0.7.0 (Home Assistant)';
+export const APP_VERSION = '0.7.1 (Home Assistant)';
 
 const DEFAULT_SETTINGS = {
   sabreUrl: 'https://cia.virginaustralia.com/cia/index.page',
   msEmail: 'piran.gartner@virginaustralia.com',
   sabreUserId: '21032',
   rosterUrl: '',
-  cycleAnchor: '20.7.02-21',
+  cycleAnchor: '20.7.12-21',
   homeBase: 'MEL',
   emojiTitles: true,
   flightSpan: 'duty',
@@ -642,7 +642,9 @@ async function viewSettings() {
       <details><summary>Automatic Authenticator code (fully unattended logins)</summary>
         <p class="muted">Lets the app generate the Microsoft verification code itself, so a capture never needs your phone. This keeps your work password and second factor together on this server, which weakens two-factor protection and is likely against Virgin's IT policy — set it up only if you accept that. In Microsoft security settings, add an authenticator app, choose "I want to use a different authenticator app", click "Next" to the QR screen, then "Can't scan image?". Paste the Secret key OR the whole otpauth:// URL it shows (not the 6-digit code).</p>
         ${pw('totpSecret', 'Authenticator setup key', creds.totpSecretSet)}
+        <p class="muted">Status: <b>${creds.totpSecretSet ? 'Saved' : 'Not set'}</b></p>
         <button class="btn" type="button" id="checkTotp">Check key</button>
+        <button class="btn primary" type="button" id="saveTotp">Save key</button>
         <span id="totpMsg" class="muted"></span>
       </details>
       <p class="muted">Passwords are encrypted on your Home Assistant box. They're never shown again, never written to logs, and excluded from Home Assistant and Google Drive backups. Leave a password box empty to keep the saved one.</p>
@@ -713,7 +715,7 @@ async function viewSettings() {
       <p class="muted">Each new roster is published on a Friday afternoon and every 4 weeks after. With this on, the app fetches that new period on publication day (first try at a random time between ${settings.autoStartHour || 15}:00 and ${(settings.autoStartHour || 15) + 1}:00), retrying every ${settings.retryMinutes || 20} min if Sabre is down, then adds it to your calendar and backs it up — no taps. It only adds and updates; it never deletes. Needs the work passwords saved, Google connected, and (for a no-phone run) the authenticator key above.</p>
       <label class="check"><input type="checkbox" id="autoEnabled" ${settings.autoEnabled ? 'checked' : ''}> Turn on automatic Friday capture</label>
       <div class="row">
-        <label>Next roster is published<input id="autoAnchor" type="date" value="${esc(settings.autoAnchorPublish || '20.7.02-11')}"></label>
+        <label>Next roster is published<input id="autoAnchor" type="date" value="${esc(settings.autoAnchorPublish || '20.7.12-11')}"></label>
         <label>Days from publish to roster start<input id="autoOffset" type="number" min="0" max="28" value="${settings.autoOffsetStart ?? 10}"></label>
       </div>
       <div class="row">
@@ -745,6 +747,16 @@ async function viewSettings() {
     try {
       const r = await api('creds/check-totp', { method: 'POST', body: { secret } });
       $('#totpMsg').textContent = r.valid ? `Looks valid — code right now is ${r.preview}. Check it matches your authenticator app, then Save.` : 'That key is not valid. Copy the setup key exactly as Microsoft shows it.';
+    } catch (e) { $('#totpMsg').textContent = e.message; }
+  });
+  $('#saveTotp')?.addEventListener('click', async () => {
+    const secret = $('#totpSecret').value.trim();
+    if (!secret) { $('#totpMsg').textContent = 'Paste the setup key first.'; return; }
+    try {
+      await api('creds', { method: 'PUT', body: { totpSecret: secret } });
+      $('#totpSecret').value = '';
+      $('#totpMsg').textContent = 'Saved. Unattended logins will use a generated code.';
+      toast('Authenticator key saved.', 'ok');
     } catch (e) { $('#totpMsg').textContent = e.message; }
   });
   $$('[data-toggle]').forEach(b => b.addEventListener('click', () => {

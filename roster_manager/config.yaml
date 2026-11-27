@@ -1,5 +1,5 @@
 name: Roster Manager
-version: "0.7.0"
+version: "0.7.1"
 slug: roster_manager
 description: Capture your Virgin Australia (Sabre) roster on demand, review it, sync it to Google Calendar and back it up to Google Drive.
 url: https://github.com/Tuttle13/roster-manager-ha
